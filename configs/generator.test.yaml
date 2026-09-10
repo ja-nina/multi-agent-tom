@@ -1,0 +1,21 @@
+seed: 20260910
+output_dir: data/test/
+domains: [science, history]
+qa_sources: [sciq]
+sizes:
+  t1_discrete: 240
+  t2_graded: 288
+  t3a_inferred_templated: 120
+  t3b_inferred_llm: 24
+name_style_ratio: {personal: 0.34, agentN: 0.33, letter: 0.33}
+format_ratio: {same_sentence: 0.5, split_sentence: 0.5}
+t3:
+  turns_per_transcript: 3
+t3b:
+  backend: vllm
+  base_url: http://localhost:8000/v1
+  models: ["Qwen/Qwen3-8B"]
+  enable_thinking: false
+  sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0}
+  seed: 20260910
+  max_tokens: 120
