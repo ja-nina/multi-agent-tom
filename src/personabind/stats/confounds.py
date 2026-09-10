@@ -8,6 +8,11 @@ from scipy import stats
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import mutual_info_score
+
+# NOTE: expected_mutual_information is a private sklearn API
+# (sklearn.metrics.cluster._supervised, re-exported via sklearn.metrics.cluster).
+# A sklearn version bump could rename or remove it and break both name_trait_mi
+# and token_trait_mi's chance correction.
 from sklearn.metrics.cluster import contingency_matrix, expected_mutual_information
 from sklearn.model_selection import cross_val_score
 
@@ -68,25 +73,30 @@ def name_trait_mi(records: list[Record]) -> tuple[float, float]:
 
 
 def token_trait_mi(records: list[Record], exclude: set[str]) -> list[tuple[str, float]]:
+    """Top-20 context tokens by chance-corrected MI (bits) with the queried level.
+
+    Like ``name_trait_mi``, the plug-in MI estimator is biased upward and the bias
+    is worst for rare tokens, so a single-occurrence noise token can otherwise
+    dominate the ranking. Two guards: (1) a document-frequency floor drops any
+    token seen in fewer than 5 records, and (2) each surviving token's MI is
+    chance-corrected by subtracting the exact expected MI under independence for
+    its 2xK (present/absent x trait_level) contingency, clamped at >= 0. Uses the
+    same ``expected_mutual_information`` helper as ``name_trait_mi``. Deterministic.
+    """
     docs = [_tok(r.context) for r in records]
     labels = np.asarray([_queried_level(r) for r in records])
+    n = len(docs)
     vocab = sorted({t for d in docs for t in d} - {e.lower() for e in exclude})
     out: list[tuple[str, float]] = []
-    y_vals = sorted(set(labels))
-    py = {v: np.mean(labels == v) for v in y_vals}
     for tok in vocab:
-        present = np.asarray([tok in d for d in docs])
-        mi = 0.0
-        for x_val in (True, False):
-            px = np.mean(present == x_val)
-            if px == 0:
-                continue
-            for v in y_vals:
-                pxy = np.mean((present == x_val) & (labels == v))
-                if pxy == 0:
-                    continue
-                mi += pxy * math.log2(pxy / (px * py[v]))
-        out.append((tok, mi))
+        present = np.fromiter((tok in d for d in docs), dtype=bool, count=n)
+        if int(present.sum()) < 5:  # document-frequency floor
+            continue
+        contingency = contingency_matrix(present, labels, sparse=True)
+        mi_nats = mutual_info_score(None, None, contingency=contingency)
+        emi_nats = expected_mutual_information(contingency, n)
+        mi_bits = max(0.0, (mi_nats - emi_nats) / _LN2)
+        out.append((tok, mi_bits))
     out.sort(key=lambda t: t[1], reverse=True)
     return out[:20]
 
@@ -140,6 +150,9 @@ def counterfactual_integrity(records: list[Record]) -> tuple[int, list[str]]:
             and r.name_style == twin.name_style
             and r.format == twin.format
         )
+        if bool(r.turns) != bool(twin.turns):
+            failing.append(r.id)
+            continue
         if r.turns and twin.turns:
             same = same and [t.qid for t in r.turns] == [t.qid for t in twin.turns]
         swapped = [a.trait_level for a in r.agents] == [a.trait_level for a in twin.agents][::-1]
