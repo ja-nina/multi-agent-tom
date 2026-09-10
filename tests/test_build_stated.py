@@ -80,3 +80,32 @@ def test_record_count_padded_up_to_cell_pair_multiple():
 def test_reject_unknown_variant():
     with pytest.raises(ValueError):
         build_stated("t3a_inferred_templated", _cfg())
+
+
+def test_t1_t2_domain_is_not_applicable():
+    # spec section 4.2: `domain` is the QA-bank tag. T1/T2 use no bank, so a
+    # pseudo-random domain label would be a meaningless grouping variable.
+    for variant in ("t1_discrete", "t2_graded"):
+        assert {r.domain for r in build_stated(variant, _cfg())} == {"n/a"}
+
+
+def test_write_jsonl_is_atomic(tmp_path):
+    import os
+    from dataclasses import replace
+
+    from personabind.generator.build import write_jsonl
+
+    recs = build_stated("t1_discrete", _cfg())
+    path = tmp_path / "out.jsonl"
+    write_jsonl(recs, str(path))
+    good = path.read_text(encoding="utf-8")
+    assert len(good.splitlines()) == len(recs)
+
+    # a record that fails validation aborts the write partway through; the
+    # previously-good file must survive untouched and no .tmp may be left behind
+    bad = list(recs)
+    bad[len(bad) // 2] = replace(recs[0], variant="not_a_variant")
+    with pytest.raises(ValueError):
+        write_jsonl(bad, str(path))
+    assert path.read_text(encoding="utf-8") == good
+    assert not os.path.exists(str(path) + ".tmp")

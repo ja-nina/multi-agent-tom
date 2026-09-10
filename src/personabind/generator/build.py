@@ -15,6 +15,12 @@ _VARIANT_TRAITS = {
 }
 _FORMATS = ("same_sentence", "split_sentence")
 
+# Spec section 4.2: `domain` is the QA-bank tag. T1/T2 state the trait outright
+# and draw on no QA bank, so they have no domain; labelling them with a
+# pseudo-random pick from `cfg.domains` invented a grouping variable that
+# downstream analysis could slice on and read meaning into.
+_DOMAIN_NA = "n/a"
+
 
 def _trait_pairs(variant: str) -> list[tuple[tuple[str, int], tuple[str, int]]]:
     return list(itertools.permutations(_VARIANT_TRAITS[variant], 2))
@@ -41,7 +47,6 @@ def build_stated(variant: str, cfg: GeneratorConfig) -> list[Record]:
     # cell emits one base + one twin, so divide the target by 2x the cell count.
     reps = max(1, -(-target // (len(cells) * 2)))  # ceil
     sampler = NameSampler(seed=derive_seed(cfg.seed, variant, "names"))
-    domains = cfg.domains
 
     records: list[Record] = []
     counter = 0
@@ -50,7 +55,6 @@ def build_stated(variant: str, cfg: GeneratorConfig) -> list[Record]:
             (t0, l0), (t1, l1) = pair
             style = sampler.pick_style(cfg.name_style_ratio)
             names = sampler.draw(style, 2)
-            domain = domains[derive_seed(cfg.seed, variant, rep, counter) % len(domains)]
 
             base_id = _pad_id(variant, counter)
             twin_id = _pad_id(variant, counter + 1)
@@ -69,7 +73,7 @@ def build_stated(variant: str, cfg: GeneratorConfig) -> list[Record]:
                     AgentSpec(names[1], 1, surfaces[1], levels[1]),
                 ]
                 rec = Record(
-                    id=rid, variant=variant, format=fmt, domain=domain,
+                    id=rid, variant=variant, format=fmt, domain=_DOMAIN_NA,
                     name_style=style, context=ctx, question=q, answer_prefix=ap,
                     agents=agents, query_agent=names[qpos], answer=surfaces[qpos],
                     counterfactual_id=cf_id, counterfactual_diff="agent_trait_map",
@@ -82,6 +86,20 @@ def build_stated(variant: str, cfg: GeneratorConfig) -> list[Record]:
 
 
 def write_jsonl(records: list[Record], path: str) -> None:
+    """Write `records` atomically: full file to `path + ".tmp"`, then rename.
+
+    `to_jsonl_line` validates as it goes, so a bad record aborts the write; a
+    direct write would then leave a partial file that looks like a complete
+    dataset to every downstream reader. `os.replace` is atomic on POSIX and
+    Windows, so `path` only ever holds a fully-written build.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.writelines(to_jsonl_line(r) + "\n" for r in records)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(to_jsonl_line(r) + "\n" for r in records)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise

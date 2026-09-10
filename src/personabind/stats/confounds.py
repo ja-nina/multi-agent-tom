@@ -34,7 +34,14 @@ T3_MARKER_PHRASES: tuple[str, ...] = tuple(HEDGE_PHRASES) + tuple(CONFIDENCE_PHR
 _NAME_WINDOW = 8
 
 
-def _tok(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
+    """Lowercase word tokens, as `token_trait_mi` counts them.
+
+    Splits on any non-word character, so "first-year" becomes ["first", "year"].
+    Callers building an exclusion set MUST tokenise with this rather than
+    `str.split()`, or a hyphenated cue phrase will never match the vocabulary it
+    is meant to exclude.
+    """
     return [m.group(0).lower() for m in _WORD.finditer(text)]
 
 
@@ -95,7 +102,7 @@ def token_trait_mi(records: list[Record], exclude: set[str]) -> list[tuple[str, 
     its 2xK (present/absent x trait_level) contingency, clamped at >= 0. Uses the
     same ``expected_mutual_information`` helper as ``name_trait_mi``. Deterministic.
     """
-    docs = [_tok(r.context) for r in records]
+    docs = [tokenize(r.context) for r in records]
     labels = np.asarray([_queried_level(r) for r in records])
     n = len(docs)
     vocab = sorted({t for d in docs for t in d} - {e.lower() for e in exclude})
@@ -113,8 +120,21 @@ def token_trait_mi(records: list[Record], exclude: set[str]) -> list[tuple[str, 
     return out[:20]
 
 
-def _binarize(level: int) -> int:
-    return 1 if level >= 2 else (level if level in (0, 1) else 0)
+def _binarize(level: int, threshold: int = 2) -> int:
+    """Collapse `trait_level` to a binary label for the AUC computation.
+
+    C2's rule is "for T2, collapse `trait_level >= 2` -> 1"; it is scoped to T2
+    because only T2 has more than two levels. Applying `>= 2` unconditionally
+    would map BOTH of T1/T3's levels (0 and 1) to 0, leaving one class and
+    pinning the AUC at 0.5 for exactly the variants the check is meant to
+    guard. `threshold` is therefore chosen per dataset by `_level_threshold`.
+    """
+    return 1 if level >= threshold else 0
+
+
+def _level_threshold(levels: list[int]) -> int:
+    """2 for T2's four tiers (the C2 midpoint collapse), 1 for binary variants."""
+    return 2 if max(levels, default=0) >= 2 else 1
 
 
 def trait_surfaces(r: Record) -> list[str]:
@@ -190,11 +210,10 @@ def masked_classifier_auc(records: list[Record]) -> float:
     already guarantee structurally. The name-window featurisation below exists
     precisely to give that adjacency class of leak somewhere to show up.
     """
-    texts, y = [], []
-    for r in records:
-        texts.append(name_windows(mask_context(r), r.query_agent))
-        y.append(_binarize(_queried_level(r)))
-    y = np.asarray(y)
+    levels = [_queried_level(r) for r in records]
+    threshold = _level_threshold(levels)
+    texts = [name_windows(mask_context(r), r.query_agent) for r in records]
+    y = np.asarray([_binarize(v, threshold) for v in levels])
     if len(set(y)) < 2:
         return 0.5
     try:

@@ -599,7 +599,7 @@ requires-dist = [
     { name = "openai" },
     { name = "pandas" },
     { name = "pyyaml" },
-    { name = "scikit-learn" },
+    { name = "scikit-learn", specifier = ">=1.6,<1.10" },
     { name = "scipy" },
     { name = "tqdm" },
 ]

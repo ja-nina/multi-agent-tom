@@ -23,7 +23,7 @@ PERSONAL_NAMES: tuple[str, ...] = (
     "Folke", "Gita", "Hedda", "Ivo", "Jonna", "Kaisa", "Leif", "Maja",
     "Nestor", "Odd", "Palle", "Ragna", "Stig", "Torvald", "Unn", "Vigdis",
     "Wiebke", "Yngve", "Zsofia", "Ansel", "Bodil", "Csaba", "Dorka", "Enzo",
-    "Fanni", "Gabor", "Henrik", "Ilona", "Janos", "Kata", "Lorand", "Match",
+    "Fanni", "Gabor", "Henrik", "Ilona", "Janos", "Kata", "Lorand", "Marek",
     "Nandor", "Orsi", "Peti", "Reka", "Soma", "Tibor", "Ubul", "Vince",
     "Zita", "Arne", "Bea", "Cille", "Dag", "Eske", "Freddy", "Gorm",
     "Helle", "Ib", "Jeppe", "Karla", "Lone", "Mette", "Nanna", "Ole",

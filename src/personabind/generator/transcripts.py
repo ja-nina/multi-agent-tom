@@ -12,6 +12,7 @@ from personabind.generator.traits import (
     T3_LABELS,
     contains_blocklisted,
 )
+from personabind.generator.vllm_backend import GenerationError, validate_turn
 from personabind.record import AgentSpec, Record, Turn
 
 _STYLE_FOR_CORRECT = {True: "hedged", False: "overconfident"}
@@ -167,9 +168,6 @@ def build_t3a(cfg: GeneratorConfig, bank: list[QAItem]) -> list[Record]:
                 records.append(rec)
             counter += 2
     return records
-
-
-from personabind.generator.vllm_backend import GenerationError, validate_turn
 
 
 def _pad_id_t3b(n: int) -> str:

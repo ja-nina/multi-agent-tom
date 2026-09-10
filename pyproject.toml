@@ -8,7 +8,11 @@ dependencies = [
     "numpy",
     "scipy",
     "pandas",
-    "scikit-learn",
+    # Upper bound guards `sklearn.metrics.cluster.expected_mutual_information`,
+    # a PRIVATE API that both name_trait_mi and token_trait_mi use for chance
+    # correction; a minor bump could rename or remove it. Re-verify before
+    # widening.
+    "scikit-learn>=1.6,<1.10",
     "pyyaml",
     "openai",
     "tqdm",

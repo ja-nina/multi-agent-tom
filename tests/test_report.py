@@ -19,6 +19,19 @@ def test_evaluate_clean_dataset_has_no_violations(tmp_path):
     assert result["name_chi2_p"] > 0.05
 
 
+def test_top_token_mi_excludes_intended_cue_tokens(tmp_path):
+    # T2's tier phrases are hyphenated ("first-year student"), and the MI
+    # tokeniser splits on the hyphen -- so a whitespace-only exclusion would let
+    # `first`/`year`/`certified` top the ranking as if they were leakage.
+    recs = build_stated("t2_graded", CFG)
+    path = tmp_path / "t2.jsonl"
+    write_jsonl(recs, str(path))
+    top = dict(evaluate_dataset(str(path))["top_token_mi"])
+    for cue in ("first", "third", "year", "senior", "board", "certified",
+                "student", "practitioner", "expert"):
+        assert cue not in top, (cue, top)
+
+
 def test_gate_flags_both_halves_of_c3_on_name_confound(tmp_path):
     # every agent's name encodes its trait_level, so name determines label.
     # Spec section 6 C3 gates on MI *and* a chi-square independence test; both

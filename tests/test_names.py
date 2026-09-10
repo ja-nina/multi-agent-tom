@@ -8,6 +8,16 @@ def test_personal_pool_size_and_distinct():
     assert len(set(PERSONAL_NAMES)) == len(PERSONAL_NAMES)
 
 
+def test_personal_pool_entries_are_single_token_names():
+    # "Match" was in the pool: a common noun reads as vocabulary rather than a
+    # name, which is exactly the kind of token the leakage checks then have to
+    # reason about.
+    assert "Match" not in PERSONAL_NAMES
+    for n in PERSONAL_NAMES:
+        assert len(n.split()) == 1, n
+        assert n[:1].isupper(), n
+
+
 def test_draw_returns_distinct_names():
     s = NameSampler(seed=1)
     for style in NAME_STYLES:
