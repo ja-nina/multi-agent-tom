@@ -93,14 +93,12 @@ def build_t3a(cfg: GeneratorConfig, bank: list[QAItem]) -> list[Record]:
                         per_agent[nm] = {"text": text, "correct": correct, "style": st}
                         lines.append(render_turn_line(nm, text))
                     wrong_text = per_agent[names[1 - accurate_pos]]["text"]
-                    try:
-                        distractor_used = next(
-                            d for d in it.distractors if d in wrong_text
-                        )
-                    except StopIteration as exc:
-                        raise ValueError(
-                            f"{it.qid}: could not recover distractor from wrong agent's answer"
-                        ) from exc
+                    # templated_answer renders exactly f"{core}. {phrase}", so the
+                    # distractor shown is the text before the first ". ". Splitting
+                    # is exact -- a substring `next(...)` match would pick the wrong
+                    # element when one distractor is a substring of another
+                    # (e.g. "12" vs "1812", "Ford" vs "Henry Ford").
+                    distractor_used = str(wrong_text).split(". ", 1)[0]
                     turns.append(
                         Turn(it.qid, it.question, it.gold, distractor_used, per_agent)
                     )

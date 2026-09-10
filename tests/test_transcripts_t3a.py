@@ -4,7 +4,11 @@ import random
 from personabind.config import GeneratorConfig
 from personabind.generator.qa_bank import QAItem
 from personabind.generator.traits import TRAIT_WORD_BLOCKLIST
-from personabind.generator.transcripts import build_t3a, templated_answer
+from personabind.generator.transcripts import (
+    build_t3a,
+    render_turn_line,
+    templated_answer,
+)
 
 
 def _bank(n=30):
@@ -41,6 +45,10 @@ def test_templated_answer_uses_distractor_when_incorrect():
     assert ("1812" in text) or ("1900" in text)
 
 
+def test_render_turn_line_format():
+    assert render_turn_line("Ada", "42. I think so.") == "Ada: 42. I think so."
+
+
 def test_t3a_records_pair_and_flip_correctness_only():
     recs = {r.id: r for r in build_t3a(_cfg(), _bank())}
     for r in recs.values():
@@ -48,8 +56,32 @@ def test_t3a_records_pair_and_flip_correctness_only():
         assert twin.counterfactual_diff == "agent_correctness_map"
         assert [a.name for a in twin.agents] == [a.name for a in r.agents]
         assert twin.question == r.question
-        assert [t.qid for t in twin.turns] == [t.qid for t in r.turns]
+        assert [t.qid for t in twin.turns] == [t.qid for t in r.turns]  # order
+        assert [a.position for a in twin.agents] == [a.position for a in r.agents]
         assert twin.answer != r.answer  # reliable <-> unreliable
+        # counterfactual invariant: the twin swaps only the correctness map, so
+        # every per-turn distractor/gold is byte-identical while context differs.
+        for i, t in enumerate(r.turns):
+            assert twin.turns[i].distractor == t.distractor
+            assert twin.turns[i].gold == t.gold
+        assert twin.context != r.context
+
+
+def test_t3a_turn_distractor_is_the_string_shown_in_context():
+    # distractors where one is a substring of another: a naive `d in wrong_text`
+    # recovery would return the wrong element.
+    bank = [
+        QAItem(f"h_{i}", "history", f"Question {i}?", f"Answer{i}",
+               ["12", "1812", "Ford"])
+        for i in range(30)
+    ]
+    for r in build_t3a(_cfg(), bank):
+        wrong_pos = next(a.position for a in r.agents if a.trait_level == 0)
+        wrong_name = r.agents[wrong_pos].name
+        for t in r.turns:
+            shown = t.answers[wrong_name]["text"]
+            assert shown.split(". ", 1)[0] == t.distractor
+            assert render_turn_line(wrong_name, shown) in r.context
 
 
 def test_t3a_context_has_no_trait_words():
@@ -64,6 +96,7 @@ def test_t3a_accurate_agent_position_is_counterbalanced():
         next(a.position for a in r.agents if a.trait_level == 1) for r in recs
     )
     assert pos_of_accurate[0] == pos_of_accurate[1]
+    assert pos_of_accurate[0] == len(recs) // 2  # non-vacuous: exact half
 
 
 def test_t3a_format_is_na():
