@@ -93,6 +93,8 @@ sbatch --partition=gpu22 --time=12:00:00 slurm/build_t3b.sbatch qwen3-8b
   layers, add `--enforce-eager` to the vLLM args in the sbatch script.
 - **`enable_thinking=False`** is sent by the client per request
   (`chat_template_kwargs`), so the server needs no special flag.
-- Remove `--disable-log-requests` from the vLLM args if your build rejects it.
+- Request logging is left at the vLLM default. To quiet it, add
+  `--no-enable-log-requests` (newer vLLM) or `--disable-log-requests`
+  (older) to the args in the sbatch script.
 - Logs: `slurm-logs/t3b-<jobid>_0.out` (job) and
   `slurm-logs/vllm-<jobid>.log` (server). `sinfo` / `squeue -u $USER` as usual.

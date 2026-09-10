@@ -79,7 +79,8 @@ echo "[info] node=${NODE_HOST}  model=${MODEL_REPO}  endpoint=${ENDPOINT}"
 echo "[info] wrote ${ENDPOINT_FILE} (and slurm/vllm.endpoint symlink)"
 
 # For hybrid Qwen3.5-9B add  --enforce-eager  if CUDA-graph capture misbehaves.
-# Remove  --disable-log-requests  if your vLLM build does not accept it.
+# Quieter logs (optional): newer vLLM uses  --no-enable-log-requests , older
+# builds used  --disable-log-requests .
 exec "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
     --model "$MODEL_REPO" \
     --served-model-name "$MODEL_REPO" \
@@ -88,5 +89,4 @@ exec "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization 0.90 \
     --max-model-len "$MAX_LEN" \
     --dtype bfloat16 \
-    --trust-remote-code \
-    --disable-log-requests
+    --trust-remote-code
