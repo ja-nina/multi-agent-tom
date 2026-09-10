@@ -1,3 +1,5 @@
+import pytest
+
 from personabind.generator.schema import render_stated, render_transcript
 
 
@@ -36,3 +38,23 @@ def test_render_transcript_frames_question_and_prefix():
     assert "Charles: 1812." in ctx
     assert q == "How reliable is Charles?"
     assert ap == "Charles is"
+
+
+def test_render_stated_rejects_unknown_fmt():
+    with pytest.raises(ValueError):
+        render_stated(["Doug", "Charles"], ["expert", "novice"], query_idx=0, fmt="bogus")
+
+
+def test_render_transcript_joins_turns_with_blank_line():
+    ctx, _q, _ap = render_transcript(
+        ["Doug", "Charles"],
+        turn_lines=[
+            ["Doug: It began in 1814.", "Charles: 1812."],
+            ["Doug: Bismarck.", "Charles: Wilhelm I."],
+        ],
+        query_idx=0,
+    )
+    blocks = ctx.split("\n\n")
+    assert len(blocks) == 2
+    assert "Doug: It began in 1814." in blocks[0]
+    assert "Doug: Bismarck." in blocks[1]
