@@ -65,7 +65,7 @@ esac
 VLLM_PYTHON="${VLLM_PYTHON:-/BS/conformal-circuits/work/mamba/envs/vllm/bin/python}"
 
 export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"     # gpu17 has no internet
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"     # set 1 only if gpu17 is air-gapped (prefetch first)
 export TOKENIZERS_PARALLELISM=false
 
 NODE_HOST="$(hostname -f 2>/dev/null || hostname)"

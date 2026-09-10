@@ -44,11 +44,11 @@
 # PREREQUISITES (see slurm/README.md):
 #   1. personabind installed:      uv sync           (creates ./.venv)
 #   2. a SEPARATE env with vLLM:   see $VLLM_PYTHON below
-#   3. HF datasets pre-fetched:    bash slurm/prefetch_data.sh   (run on a
-#      login node -- gpu17 nodes have no outbound internet, so load_bank()
-#      cannot download allenai/sciq, cais/mmlu, allenai/ai2_arc at job time)
-#   4. model weights pre-fetched into $HF_HOME the same way, or the first
-#      `vllm serve` on a node with internet.
+#   3. HF cache: by default the job downloads any missing datasets
+#      (allenai/sciq, cais/mmlu, allenai/ai2_arc) and model weights into
+#      $HF_HOME at run time. If your gpu17 nodes are air-gapped, run
+#      `bash slurm/prefetch_data.sh <model>` on a login node first and
+#      submit with  HF_HUB_OFFLINE=1 .
 #
 # Qwen3.5-9B CAVEAT (spec 5.1): its model_type is qwen3_next (hybrid Gated
 # DeltaNet + full attention). It needs a recent vLLM that ships
@@ -84,9 +84,14 @@ PYTHON="${PERSONABIND_PYTHON:-$PWD/.venv/bin/python}"
 # pyproject -- Phase 0 must stay torch/transformers-free):
 VLLM_PYTHON="${VLLM_PYTHON:-/BS/conformal-circuits/work/mamba/envs/vllm/bin/python}"
 
-# Shared HF cache -- must already be populated (see PREREQUISITES).
+# Shared HF cache. By default the job is allowed to download missing
+# datasets/weights into $HF_HOME at run time (the PersVecGen jobs on this
+# cluster do the same -- compute nodes have outbound internet). If YOUR
+# gpu17 nodes are air-gapped, run `bash slurm/prefetch_data.sh <model>` on a
+# login node first, then submit with  HF_HUB_OFFLINE=1  to fail loud instead
+# of hanging on a blocked connection.
 export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"     # gpu17 has no internet; fail loud, don't hang
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 export TOKENIZERS_PARALLELISM=false
 
 OUT="data/t3b_inferred_llm.jsonl"
