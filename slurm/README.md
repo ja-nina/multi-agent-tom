@@ -29,16 +29,21 @@ and interpreters pinned via `PYTHON=` env vars because this cluster has no
    mamba create -n vllm python=3.11 -y
    mamba run -n vllm pip install "vllm>=0.11"      # needs Qwen3-Next support for qwen3.5-9b
    ```
-   Then point the scripts at it: `export VLLM_PYTHON=/path/to/mamba/envs/vllm/bin/python`
-   (the default in the scripts is `/BS/conformal-circuits/work/mamba/envs/vllm/bin/python`).
-3. **Warm the caches on a login node** (gpu17 nodes have no outbound internet):
+   Then point the scripts at it: `export VLLM_PYTHON=/path/to/env/bin/python`
+   (the scripts' placeholder default is
+   `/BS/conformal-circuits/work/mamba/envs/vllm/bin/python` — an env with
+   `torch`/`transformers` already, such as `ma-testbed`, works too).
+3. **HF cache.** By default the jobs download missing datasets
+   (`allenai/sciq`, `cais/mmlu`, `allenai/ai2_arc`) and model weights into
+   `$HF_HOME` (default `./.hf_cache`) at run time, like the other
+   `PersVecGen` jobs on this cluster. **Only if your gpu17 nodes turn out
+   to be air-gapped**, warm the cache on a login node first and then submit
+   with `HF_HUB_OFFLINE=1`:
    ```bash
-   bash slurm/prefetch_data.sh              # datasets: allenai/sciq, cais/mmlu, allenai/ai2_arc
+   bash slurm/prefetch_data.sh              # datasets
    bash slurm/prefetch_data.sh qwen3-8b     # + weights
    bash slurm/prefetch_data.sh qwen3.5-9b   # + weights
    ```
-   Everything lands in `$HF_HOME` (default `./.hf_cache`); the jobs read it
-   with `HF_HUB_OFFLINE=1`.
 
 ## Running it
 
