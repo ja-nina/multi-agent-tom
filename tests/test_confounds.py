@@ -95,6 +95,96 @@ def test_counterfactual_integrity_flags_turns_asymmetry():
     assert r0.id in failing
 
 
+def _t3a_pair():
+    """A small T3a build: two-record counterfactual pairs carrying turns."""
+    from personabind.config import load_config
+    from personabind.generator.qa_bank import QAItem
+    from personabind.generator.transcripts import build_t3a
+
+    bank = [QAItem(f"h_{i}", "history", f"Question {i}?", f"Ansr{i}",
+                   [f"Wrng{i}a", f"Wrng{i}b"]) for i in range(40)]
+    return build_t3a(load_config("configs/generator.test.yaml"), bank)
+
+
+def test_counterfactual_integrity_flags_differing_per_turn_gold():
+    from dataclasses import replace
+
+    recs = _t3a_pair()
+    _, failing = counterfactual_integrity(recs)
+    assert failing == [], failing
+
+    # tamper one record's first-turn gold: qids still line up, so a qid-only
+    # check would miss it.
+    r0 = recs[0]
+    bad_turns = [replace(r0.turns[0], gold="TAMPERED")] + list(r0.turns[1:])
+    tampered = [replace(r, turns=bad_turns) if r.id == r0.id else r for r in recs]
+    _, failing = counterfactual_integrity(tampered)
+    assert r0.id in failing
+    assert r0.counterfactual_id in failing  # both halves of the pair report it
+
+
+def test_counterfactual_integrity_flags_mismatched_counterfactual_diff():
+    from dataclasses import replace
+
+    recs = _t3a_pair()
+    r0 = recs[0]
+    tampered = [
+        replace(r, counterfactual_diff="agent_trait_map") if r.id == r0.id else r
+        for r in recs
+    ]
+    _, failing = counterfactual_integrity(tampered)
+    assert r0.id in failing
+
+
+def test_counterfactual_integrity_flags_pair_sharing_a_trait_level():
+    # both agents at the same level makes "exactly reversed" vacuously true.
+    from dataclasses import replace
+
+    recs = build_stated("t1_discrete", _cfg())
+    r0 = recs[0]
+    twin_id = r0.counterfactual_id
+    flat = {r0.id, twin_id}
+    tampered = [
+        replace(r, agents=[replace(a, trait_level=1, trait="expert") for a in r.agents])
+        if r.id in flat else r
+        for r in recs
+    ]
+    _, failing = counterfactual_integrity(tampered)
+    assert r0.id in failing
+    assert twin_id in failing
+
+
+def test_masked_classifier_detects_name_adjacent_leak():
+    # plant a token immediately after the queried agent's name iff that agent is
+    # the expert. The counterfactual twin does NOT cancel this, because the name
+    # moves with the label -- exactly the leak class the window featurisation is
+    # there to catch.
+    from dataclasses import replace
+
+    recs = build_stated("t1_discrete", _cfg())
+    assert masked_classifier_auc(recs) < 0.60  # clean baseline
+
+    tampered = []
+    for r in recs:
+        lvl = next(a.trait_level for a in r.agents if a.name == r.query_agent)
+        ctx = r.context.replace(r.query_agent, f"{r.query_agent} zzleak", 1) if lvl == 1 \
+            else r.context
+        tampered.append(replace(r, context=ctx))
+    assert masked_classifier_auc(tampered) > 0.90
+
+
+def test_masked_classifier_windows_around_queried_name():
+    from personabind.stats.confounds import name_windows
+
+    text = "far far far far far far far far far away Doug: near tokens here"
+    got = name_windows(text, "Doug", width=2)
+    assert got == "far away Doug: near tokens"
+    # multi-token letter style matches on the discriminating last token
+    assert "B:" in name_windows("Agent A: x. Agent B: y.", "Agent B", width=1)
+    # name absent -> whole masked context
+    assert name_windows("nothing here", "Doug") == "nothing here"
+
+
 def test_token_trait_mi_floor_and_correction():
     from dataclasses import replace
 

@@ -3,8 +3,30 @@ import pytest
 from personabind.generator.qa_bank import (
     QAItem,
     is_clean,
+    make_qid,
     normalize_mmlu,
 )
+
+
+def test_qid_is_content_derived_and_stable():
+    # same question -> same qid, every call and every process: the qid is
+    # written into records and into the T3b cache key, so a counter would make
+    # two builds of the same bank incomparable.
+    assert make_qid("sciq", "What is water?") == make_qid("sciq", "What is water?")
+    assert make_qid("sciq", "  WHAT IS WATER?  ") == make_qid("sciq", "What is water?")
+    assert make_qid("sciq", "What is water?") != make_qid("sciq", "What is air?")
+    assert make_qid("arc", "What is water?") != make_qid("sciq", "What is water?")
+    assert make_qid("sciq", "What is water?").startswith("sciq_")
+
+
+def test_normalize_mmlu_qid_does_not_depend_on_call_order():
+    row_a = {"question": "Q A?", "choices": ["a", "b", "c", "d"], "answer": 0,
+             "subject": "anatomy"}
+    row_b = {"question": "Q B?", "choices": ["a", "b", "c", "d"], "answer": 1,
+             "subject": "anatomy"}
+    first = normalize_mmlu(row_a).qid
+    normalize_mmlu(row_b)
+    assert normalize_mmlu(row_a).qid == first
 
 
 def test_normalize_mmlu_maps_options_to_gold_and_distractors():

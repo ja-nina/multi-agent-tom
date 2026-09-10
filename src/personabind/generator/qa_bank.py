@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from personabind.generator.traits import contains_blocklisted
@@ -35,12 +36,21 @@ class QAItem:
     distractors: list[str]
 
 
-_seq = {"n": 0}
+def make_qid(src: str, question: str) -> str:
+    """Content-derived question id: `<source>_<hash of the normalised question>`.
 
+    Deriving the id from the question text -- rather than a process-global
+    counter -- makes it stable across `load_bank` calls, processes and partial
+    reloads. That matters because the id is written into every emitted record's
+    `turns[].qid` and is part of the T3b generation cache key: a counter would
+    hand the same question a different id on the next run, silently invalidating
+    the cache and making two builds of "the same" dataset incomparable.
 
-def _next_qid(prefix: str) -> str:
-    _seq["n"] += 1
-    return f"{prefix}_{_seq['n']:06d}"
+    Two items whose normalised questions collide get the same id; `load_bank`
+    already dedups on the lowercased question, so at most one of them survives.
+    """
+    h = hashlib.blake2b(question.strip().lower().encode("utf-8"), digest_size=6)
+    return f"{src}_{h.hexdigest()}"
 
 
 def normalize_mmlu(row: dict) -> QAItem | None:
@@ -54,8 +64,8 @@ def normalize_mmlu(row: dict) -> QAItem | None:
         return None
     gold = str(choices[ans]).strip()
     distractors = [str(c).strip() for i, c in enumerate(choices) if i != ans]
-    item = QAItem(_next_qid("mmlu"), domain, str(row["question"]).strip(), gold, distractors)
-    return item
+    question = str(row["question"]).strip()
+    return QAItem(make_qid("mmlu", question), domain, question, gold, distractors)
 
 
 def is_clean(item: QAItem) -> bool:
@@ -105,8 +115,8 @@ def _load_source(source: str, cache_dir: str, limit: int | None) -> list[QAItem]
         ds = load_dataset("allenai/sciq", split="train", cache_dir=cache_dir)
         for row in ds:
             distractors = [row["distractor1"], row["distractor2"], row["distractor3"]]
-            items.append(QAItem(_next_qid("sciq"), "science",
-                                str(row["question"]).strip(),
+            question = str(row["question"]).strip()
+            items.append(QAItem(make_qid("sciq", question), "science", question,
                                 str(row["correct_answer"]).strip(),
                                 [str(d).strip() for d in distractors]))
             if limit and len(items) >= limit:
@@ -122,8 +132,9 @@ def _load_source(source: str, cache_dir: str, limit: int | None) -> list[QAItem]
             gi = labels.index(key)
             gold = str(texts[gi]).strip()
             distractors = [str(t).strip() for j, t in enumerate(texts) if j != gi]
-            items.append(QAItem(_next_qid("arc"), "science",
-                                str(row["question"]).strip(), gold, distractors))
+            question = str(row["question"]).strip()
+            items.append(QAItem(make_qid("arc", question), "science",
+                                question, gold, distractors))
             if limit and len(items) >= limit:
                 break
     else:

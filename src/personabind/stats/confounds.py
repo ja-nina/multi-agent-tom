@@ -16,10 +16,22 @@ from sklearn.metrics import mutual_info_score
 from sklearn.metrics.cluster import contingency_matrix, expected_mutual_information
 from sklearn.model_selection import cross_val_score
 
+from personabind.generator.traits import CONFIDENCE_PHRASES, HEDGE_PHRASES, article_for
 from personabind.record import Record
 
 _WORD = re.compile(r"[A-Za-z0-9']+")
 _LN2 = math.log(2.0)
+_PUNCT = ".,;:!?\"'()"
+
+# The curated markers that carry T3's *intended* cue. Spec section 6 C2 lists
+# them alongside gold/distractor as tokens the leakage checks must exclude:
+# hedging-vs-overconfidence IS the signal, so leaving them in would measure the
+# task rather than a confound.
+T3_MARKER_PHRASES: tuple[str, ...] = tuple(HEDGE_PHRASES) + tuple(CONFIDENCE_PHRASES)
+
+# Half-width, in whitespace tokens, of the window kept around each mention of
+# the queried agent's name.
+_NAME_WINDOW = 8
 
 
 def _tok(text: str) -> list[str]:
@@ -105,23 +117,91 @@ def _binarize(level: int) -> int:
     return 1 if level >= 2 else (level if level in (0, 1) else 0)
 
 
+def trait_surfaces(r: Record) -> list[str]:
+    """Every surface form of the intended trait cue in `r.context`.
+
+    Includes the article-prefixed form ("an expert", "a novice") as well as the
+    bare trait. The article is emitted by `article_for(trait)` -- a pure
+    function of the trait word -- so it is part of the trait slot, not
+    independent framing vocabulary: blanking only the head noun leaves "is an"
+    vs "is a" standing next to the queried agent's name as a perfect one-to-one
+    proxy for the label.
+    """
+    out: list[str] = []
+    for a in r.agents:
+        if a.trait:
+            out.append(f"{article_for(a.trait)} {a.trait}")
+            out.append(a.trait)
+    return out
+
+
+def mask_context(r: Record) -> str:
+    """Blank the intended cue from `r.context`: trait surfaces (T1/T2), and for
+    T3 every per-turn gold/distractor plus the curated hedge/confidence markers.
+
+    Longest-first so a phrase that contains another is removed whole rather than
+    left as a fragment by the shorter match.
+    """
+    ctx = r.context
+    blanks = trait_surfaces(r)
+    if r.turns:
+        for t in r.turns:
+            blanks += [t.gold, t.distractor]
+        blanks += list(T3_MARKER_PHRASES)
+    for b in sorted({b for b in blanks if b}, key=len, reverse=True):
+        ctx = re.sub(re.escape(b), " ", ctx, flags=re.IGNORECASE)
+    return ctx
+
+
+def name_windows(masked: str, name: str, width: int = _NAME_WINDOW) -> str:
+    """Concatenate the +/-`width`-token windows around each mention of `name`.
+
+    Restricting features to the neighbourhood of the queried agent's name is
+    what makes an *adjacency* leak visible: a cue that sits next to this name
+    specifically survives, while vocabulary spread evenly over the transcript is
+    dropped. Matching is on the last whitespace token of the name, which is the
+    discriminating one for the multi-token `letter` style ("Agent A" vs
+    "Agent B"), compared whole-word after stripping punctuation so a name is not
+    matched inside a longer word. Falls back to the whole masked context when
+    the name does not appear.
+    """
+    toks = masked.split()
+    key = name.split()[-1].strip(_PUNCT).lower() if name.split() else ""
+    out: list[str] = []
+    for i, t in enumerate(toks):
+        if t.strip(_PUNCT).lower() == key:
+            out.extend(toks[max(0, i - width): i + width + 1])
+    return " ".join(out) if out else masked
+
+
 def masked_classifier_auc(records: list[Record]) -> float:
+    """C2 masked-classifier check: with the intended cue blanked, can a
+    bag-of-words model still predict the queried agent's trait level?
+
+    CAVEAT -- what this number can and cannot show. Every record ships with a
+    counterfactual twin that is the same bag of words carrying the opposite
+    label, so any *document-level* BoW feature is label-balanced by
+    construction and this AUC sits at chance for any dataset this generator
+    emits. That makes it a regression guard, not an independent proof of
+    cleanliness: it would catch a future `build.py` change that made some token
+    sit next to the queried agent's name only when that agent is the expert /
+    accurate one (which the twin does NOT cancel, because the name moves with
+    the label), but it cannot certify the current data beyond what C1/C3/C4/C5
+    already guarantee structurally. The name-window featurisation below exists
+    precisely to give that adjacency class of leak somewhere to show up.
+    """
     texts, y = [], []
     for r in records:
-        ctx = r.context
-        blanks = [a.trait for a in r.agents]
-        if r.turns:
-            for t in r.turns:
-                blanks += [t.gold, t.distractor]
-        for b in blanks:
-            if b:
-                ctx = re.sub(re.escape(b), " ", ctx, flags=re.IGNORECASE)
-        texts.append(ctx)
+        texts.append(name_windows(mask_context(r), r.query_agent))
         y.append(_binarize(_queried_level(r)))
     y = np.asarray(y)
     if len(set(y)) < 2:
         return 0.5
-    pipe_x = TfidfVectorizer(min_df=2).fit_transform(texts)
+    try:
+        # bigrams so "<name> is" style adjacency patterns are representable at all
+        pipe_x = TfidfVectorizer(min_df=2, ngram_range=(1, 2)).fit_transform(texts)
+    except ValueError:  # empty vocabulary: nothing survived masking -> no signal
+        return 0.5
     clf = LogisticRegression(max_iter=500)
     scores = cross_val_score(clf, pipe_x, y, cv=5, scoring="roc_auc")
     return float(scores.mean())
@@ -135,6 +215,12 @@ def format_balance(records: list[Record]) -> dict[str, int]:
 
 
 def counterfactual_integrity(records: list[Record]) -> tuple[int, list[str]]:
+    """C5: every record's twin must differ ONLY in the agent->trait/correctness map.
+
+    Spec section 6 C5 requires identical names, positions, question, domain,
+    name_style, format and -- for T3 -- per-turn `qid`, `question`, `gold` and
+    `distractor`, with the trait assignment exactly transposed.
+    """
     by_id = {r.id: r for r in records}
     failing: list[str] = []
     for r in records:
@@ -149,13 +235,29 @@ def counterfactual_integrity(records: list[Record]) -> tuple[int, list[str]]:
             and r.domain == twin.domain
             and r.name_style == twin.name_style
             and r.format == twin.format
+            # the pair must agree on WHAT was transposed, or "minimal pair" is
+            # not a claim the file supports.
+            and r.counterfactual_diff == twin.counterfactual_diff
         )
         if bool(r.turns) != bool(twin.turns):
             failing.append(r.id)
             continue
         if r.turns and twin.turns:
-            same = same and [t.qid for t in r.turns] == [t.qid for t in twin.turns]
-        swapped = [a.trait_level for a in r.agents] == [a.trait_level for a in twin.agents][::-1]
+            # Full per-turn content, not just qid: a tampered gold/distractor or
+            # a reworded question leaves the qids intact while breaking the
+            # minimal pair, which is exactly the corruption C5 exists to catch.
+            same = same and (
+                [(t.qid, t.question, t.gold, t.distractor) for t in r.turns]
+                == [(t.qid, t.question, t.gold, t.distractor) for t in twin.turns]
+            )
+        levels = [a.trait_level for a in r.agents]
+        # `levels == levels[::-1]` is vacuously true when both agents share a
+        # level, so a degenerate pair would otherwise pass as "exactly
+        # reversed". T1/T2/T3 all bind two distinct levels per record.
+        swapped = (
+            len(set(levels)) == len(levels)
+            and levels == [a.trait_level for a in twin.agents][::-1]
+        )
         if not (same and swapped):
             failing.append(r.id)
     return len(records) - len(failing), failing

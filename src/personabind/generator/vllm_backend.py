@@ -11,6 +11,24 @@ class GenerationError(RuntimeError):
     pass
 
 
+def _is_model_not_found(exc: Exception) -> bool:
+    """True if `exc` is the server rejecting the model id (HTTP 404).
+
+    Checked structurally rather than by `isinstance(exc, openai.NotFoundError)`
+    alone, so it still works when `openai` is absent or the client wraps the
+    error: any exception carrying `status_code == 404` counts.
+    """
+    if getattr(exc, "status_code", None) == 404:
+        return True
+    if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+        return True
+    try:
+        import openai
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, openai.NotFoundError)
+
+
 def validate_turn(
     text: str, gold: str, distractor: str | None, correct: bool
 ) -> tuple[bool, str]:
@@ -71,8 +89,22 @@ class VLLMBackend:
         os.makedirs(cache_dir, exist_ok=True)
         self._client = None
 
-    def _cache_path(self, qid: str, correct: bool, style: str, attempt: int) -> str:
-        key = f"{self.model}|{qid}|{correct}|{style}|{self.seed}|{attempt}"
+    def _cache_path(
+        self, qid: str, question: str, gold: str, distractor: str | None,
+        correct: bool, style: str, attempt: int,
+    ) -> str:
+        """Cache key = the request identity plus a hash of the prompt content.
+
+        Keying on `qid` alone was unsafe: a qid identifies a question, not the
+        exact prompt, so re-running against an edited bank (a corrected gold, a
+        different sampled distractor) would silently serve the stale generation
+        for the old content. Hashing question/gold/distractor alongside makes a
+        content change a cache miss.
+        """
+        content = hashlib.blake2b(
+            f"{question}\x1f{gold}\x1f{distractor}".encode(), digest_size=8
+        ).hexdigest()
+        key = f"{self.model}|{qid}|{content}|{correct}|{style}|{self.seed}|{attempt}"
         h = hashlib.blake2b(key.encode("utf-8"), digest_size=16).hexdigest()
         return os.path.join(self.cache_dir, f"{h}.json")
 
@@ -86,7 +118,7 @@ class VLLMBackend:
         return self._client
 
     def generate(self, qid, question, gold, distractor, correct, style, attempt) -> str:
-        path = self._cache_path(qid, correct, style, attempt)
+        path = self._cache_path(qid, question, gold, distractor, correct, style, attempt)
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 return json.load(fh)["text"]
@@ -107,8 +139,18 @@ class VLLMBackend:
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
             )
-        except Exception as e:  # openai.APIConnectionError and friends
-            raise GenerationError(
+        except Exception as e:
+            # A reachable server that does not serve this model is a config
+            # error, not a "start the server" error -- distinguishing them
+            # matters because generator.yaml can name several models and only
+            # one is typically loaded at a time.
+            if _is_model_not_found(e):
+                raise GenerationError(
+                    f"model {self.model!r} is not served at {self.base_url}: {e}. "
+                    f"Start it, e.g. `vllm serve {self.model} --port 8000`, or "
+                    f"set t3b.models to a model this server already serves."
+                ) from e
+            raise GenerationError(  # openai.APIConnectionError and friends
                 f"could not reach vLLM server at {self.base_url}: {e}. "
                 f"Start it, e.g. `vllm serve {self.model} --port 8000`."
             ) from e

@@ -14,7 +14,12 @@ t3:
 t3b:
   backend: vllm
   base_url: http://localhost:8000/v1
-  models: ["Qwen/Qwen3-8B", "Qwen/Qwen3.5-9B"]
+  # One model per build: a vLLM server serves a single model, so listing two
+  # here makes the build fail as soon as it cycles onto the one that is not
+  # loaded. To build the other (spec section 5.4 compares them), rerun with
+  #   models: ["Qwen/Qwen3.5-9B"]
+  # against a server hosting it; each model writes its own file, compared later.
+  models: ["Qwen/Qwen3-8B"]
   enable_thinking: false
   sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0}
   seed: 20260910

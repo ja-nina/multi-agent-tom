@@ -10,7 +10,13 @@ from personabind.stats.confounds import (
     token_trait_mi,
 )
 
-THRESHOLDS = {"position_r": 0.02, "name_mi_bits": 0.01, "masked_auc": 0.55}
+THRESHOLDS = {
+    "position_r": 0.02, "name_mi_bits": 0.01, "masked_auc": 0.55,
+    # C3 is a two-part gate: MI below threshold AND chi-square failing to
+    # reject independence. `name_chi2_p <= 0.05` rejects independence, i.e. the
+    # test found a name->trait association.
+    "name_chi2_p": 0.05,
+}
 
 
 def _read(path: str) -> list[Record]:
@@ -45,6 +51,11 @@ def evaluate_dataset(path: str) -> dict:
         violations.append(f"position_r {pos_r:.4f} >= {THRESHOLDS['position_r']}")
     if mi_bits >= THRESHOLDS["name_mi_bits"]:
         violations.append(f"name_mi_bits {mi_bits:.4f} >= {THRESHOLDS['name_mi_bits']}")
+    if chi2_p <= THRESHOLDS["name_chi2_p"]:
+        violations.append(
+            f"name chi2 p {chi2_p:.4g} <= {THRESHOLDS['name_chi2_p']} "
+            "(name/trait_level independence rejected)"
+        )
     if auc >= THRESHOLDS["masked_auc"]:
         violations.append(f"masked_auc {auc:.3f} >= {THRESHOLDS['masked_auc']}")
     if failing:
