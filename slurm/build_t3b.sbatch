@@ -115,14 +115,14 @@ echo "[info] vLLM python:        ${VLLM_PYTHON}"
     --max-model-len 8192 \
     --dtype bfloat16 \
     --trust-remote-code \
-    --disable-log-requests \
     > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 trap 'echo "[info] stopping vLLM (pid $VLLM_PID)"; kill "$VLLM_PID" 2>/dev/null || true; wait "$VLLM_PID" 2>/dev/null || true' EXIT
 
 # For the hybrid Qwen3.5-9B, if CUDA-graph capture is flaky on the Gated
 # DeltaNet layers, add   --enforce-eager   to the args above.
-# If your vLLM build rejects  --disable-log-requests , just remove that line.
+# Quieter server logs: newer vLLM uses  --no-enable-log-requests  (older
+# builds used  --disable-log-requests ). Optional either way.
 
 # --- wait for health (model load can take several minutes cold) ---------------
 echo "[info] waiting for vLLM /health on ${BASE_URL%/v1}/health ..."
