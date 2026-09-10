@@ -199,7 +199,10 @@ def build_t3b(
     counter = 0
     for rep in range(reps):
         for qpos, apos in cells:
-            model = models[counter % len(models)]
+            # `counter` is the running base-record index (+= 2 per cell), so
+            # `counter // 2` is the cell/pair index -- models cycle 0,1,0,1...
+            # across cells while a cell's base and twin still share one `model`.
+            model = models[(counter // 2) % len(models)]
             backend = backends[model]
             style_name = sampler.pick_style(cfg.name_style_ratio)
             names = sampler.draw(style_name, 2)
