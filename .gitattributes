@@ -1,0 +1,4 @@
+# Shell / SLURM scripts run on a Linux cluster — always check them out with
+# LF, regardless of the local core.autocrlf setting.
+*.sh      text eol=lf
+*.sbatch  text eol=lf
