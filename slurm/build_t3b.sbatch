@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=personabind-t3b
-#SBATCH --array=0-0%10
-#SBATCH -p gpu17
+#SBATCH --array=0-20%10
+#SBATCH -p gpu-a100
 #SBATCH -c 10
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=gpu22-a40-05,gpu22-a40-06,gpu17-l40-07,gpu17-l40-20
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=slurm-logs/t3b-%A_%a.out
 #SBATCH --error=slurm-logs/t3b-%A_%a.err
 
@@ -82,7 +82,7 @@ esac
 PYTHON="${PERSONABIND_PYTHON:-$PWD/.venv/bin/python}"
 # a SEPARATE env that has vLLM installed (do NOT add vllm to personabind's
 # pyproject -- Phase 0 must stay torch/transformers-free):
-VLLM_PYTHON="${VLLM_PYTHON:-/BS/conformal-circuits/work/mamba/envs/vllm/bin/python}"
+VLLM_PYTHON="${VLLM_PYTHON:-/BS/conformal-circuits/work/mamba/envs/ma-testbed/bin/python}"
 
 # Shared HF cache -- must already be populated (see PREREQUISITES).
 export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
