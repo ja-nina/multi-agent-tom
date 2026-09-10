@@ -115,6 +115,15 @@ def test_t3b_tries_exactly_five_attempts_before_raising():
     assert backend.calls == 5
 
 
+def test_t3b_context_contains_every_turn_question():
+    recs, _ = build_t3b(_cfg(), _bank(), _echo_factory)
+    for r in recs:
+        for i, t in enumerate(r.turns):
+            assert t.question in r.context
+            # spec section 5.3: each turn block opens with a 1-indexed `Qn:` header
+            assert f"Q{i + 1}: {t.question}" in r.context
+
+
 def test_t3b_record_count_matches_target():
     target = 16  # multiple of len(cells) * 2 == 8
     recs, _ = build_t3b(_cfg(size=target), _bank(), _echo_factory)

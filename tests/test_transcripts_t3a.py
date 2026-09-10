@@ -68,11 +68,12 @@ def test_t3a_records_pair_and_flip_correctness_only():
 
 
 def test_t3a_turn_distractor_is_the_string_shown_in_context():
-    # distractors where one is a substring of another: a naive `d in wrong_text`
-    # recovery would return the wrong element.
+    # distractors where one is a substring of another: recovering the distractor
+    # from the rendered text would be ambiguous, so it is drawn explicitly and
+    # `Turn.distractor` records exactly the string that was rendered.
+    distractors = ["12", "1812", "Ford"]
     bank = [
-        QAItem(f"h_{i}", "history", f"Question {i}?", f"Answer{i}",
-               ["12", "1812", "Ford"])
+        QAItem(f"h_{i}", "history", f"Question {i}?", f"Answer{i}", list(distractors))
         for i in range(30)
     ]
     for r in build_t3a(_cfg(), bank):
@@ -80,8 +81,33 @@ def test_t3a_turn_distractor_is_the_string_shown_in_context():
         wrong_name = r.agents[wrong_pos].name
         for t in r.turns:
             shown = t.answers[wrong_name]["text"]
-            assert shown.split(". ", 1)[0] == t.distractor
+            assert t.distractor in distractors
+            assert shown.startswith(f"{t.distractor}. ")
             assert render_turn_line(wrong_name, shown) in r.context
+
+
+def test_t3a_context_contains_every_turn_question():
+    for r in build_t3a(_cfg(), _bank()):
+        for t in r.turns:
+            assert t.question in r.context
+        # spec section 5.3: each turn block opens with a 1-indexed `Qn:` header
+        for i, t in enumerate(r.turns):
+            assert f"Q{i + 1}: {t.question}" in r.context
+
+
+def test_t3a_twin_shares_distractor_with_multi_distractor_bank():
+    # the per-(cell, turn) distractor draw happens before the base/twin split,
+    # so both records of a pair render the identical wrong answer.
+    bank = [
+        QAItem(f"h_{i}", "history", f"Question {i}?", f"Answer{i}",
+               [f"W{i}a", f"W{i}b", f"W{i}c", f"W{i}d"])
+        for i in range(30)
+    ]
+    recs = {r.id: r for r in build_t3a(_cfg(), bank)}
+    for r in recs.values():
+        twin = recs[r.counterfactual_id]
+        for i, t in enumerate(r.turns):
+            assert twin.turns[i].distractor == t.distractor
 
 
 def test_t3a_context_has_no_trait_words():

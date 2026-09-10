@@ -41,6 +41,17 @@ TRAIT_WORD_BLOCKLIST: frozenset[str] = frozenset({
 _VOWELS = set("aeiou")
 
 
+def contains_blocklisted(text: str) -> bool:
+    """Whole-word, case-insensitive match of `text` against TRAIT_WORD_BLOCKLIST.
+
+    Shared by the QA-bank filter (`qa_bank.is_clean`) and the T3 transcript
+    context invariant so both tokenise identically: an item rejected by the bank
+    is exactly an item that would have tripped the context check.
+    """
+    tokens = {t.strip(".,;:!?\"'()").lower() for t in text.split()}
+    return bool(tokens & TRAIT_WORD_BLOCKLIST)
+
+
 def article_for(phrase: str) -> str:
     """Return 'a'/'an' for `phrase`. Uses a first-letter vowel check only;
     does not handle 'hour'/'university'-style exceptions (none occur in our vocab)."""

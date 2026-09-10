@@ -10,7 +10,7 @@ from personabind.generator.traits import (
     CONFIDENCE_PHRASES,
     HEDGE_PHRASES,
     T3_LABELS,
-    TRAIT_WORD_BLOCKLIST,
+    contains_blocklisted,
 )
 from personabind.record import AgentSpec, Record, Turn
 
@@ -22,15 +22,47 @@ def render_turn_line(name: str, answer_text: str) -> str:
     return f"{name}: {answer_text}"
 
 
-def templated_answer(item: QAItem, correct: bool, style: str, rng: random.Random) -> str:
-    core = item.gold if correct else rng.choice(item.distractors)
+def render_question_line(turn_index: int, question: str) -> str:
+    """The `Qn: <question>` header that opens each turn block (spec section 5.3).
+
+    1-indexed, so the first turn renders as `Q1: ...`.
+    """
+    return f"Q{turn_index + 1}: {question}"
+
+
+def templated_answer(
+    item: QAItem, correct: bool, style: str, rng: random.Random,
+    distractor: str | None = None,
+) -> str:
+    """Render one agent's turn text as ``f"{core}. {phrase}"``.
+
+    `distractor` supplies the wrong answer explicitly so the caller can record
+    the exact string it rendered (and share it byte-for-byte across a
+    counterfactual pair). When omitted on an incorrect turn one is drawn from
+    `rng` for convenience.
+    """
+    if correct:
+        core = item.gold
+    else:
+        core = distractor if distractor is not None else rng.choice(item.distractors)
     phrase = rng.choice(_PHRASES[style])
     return f"{core}. {phrase}"
 
 
-def _contains_blocklisted(text: str) -> bool:
-    tokens = {t.strip(".,;:!?").lower() for t in text.split()}
-    return bool(tokens & TRAIT_WORD_BLOCKLIST)
+def _check_context(rid: str, ctx: str, turns: list[Turn]) -> None:
+    """Post-build invariants on a rendered transcript context.
+
+    (1) every turn's question text is actually present -- spec section 5.3 renders a
+    `Qn:` line before the agent lines, and a silently question-less transcript
+    would make the task unanswerable; (2) no trait/seniority word leaked in
+    (C2). Raises `ValueError` naming the record so a build failure is
+    attributable, rather than tripping a bare `assert` that `-O` would strip.
+    """
+    for i, t in enumerate(turns):
+        if t.question not in ctx:
+            raise ValueError(f"{rid}: turn {i + 1} question missing from context")
+    if contains_blocklisted(ctx):
+        raise ValueError(f"{rid}: blocklisted word in context")
 
 
 def _pad_id(n: int) -> str:
@@ -58,6 +90,15 @@ def build_t3a(cfg: GeneratorConfig, bank: list[QAItem]) -> list[Record]:
             rng = random.Random(derive_seed(cfg.seed, "t3a", rep, counter))
             items = rng.sample(bank, k)
             domain = items[0].domain
+            # Draw each turn's wrong answer from a deterministic sub-stream keyed
+            # by (cell, turn) -- NOT by which record of the pair -- so the base
+            # and its twin render and record a byte-identical `distractor`.
+            wrong_answers = [
+                random.Random(
+                    derive_seed(cfg.seed, "t3a", rep, counter, ti, "distractor")
+                ).choice(it.distractors)
+                for ti, it in enumerate(items)
+            ]
 
             base_id, twin_id = _pad_id(counter), _pad_id(counter + 1)
 
@@ -85,26 +126,22 @@ def build_t3a(cfg: GeneratorConfig, bank: list[QAItem]) -> list[Record]:
                         ),
                     }
                     per_agent: dict[str, dict[str, object]] = {}
-                    lines = []
+                    lines = [render_question_line(ti, it.question)]
                     for pos, nm in enumerate(names):
                         correct = pos == accurate_pos
                         st = _STYLE_FOR_CORRECT[correct]
-                        text = templated_answer(it, correct, st, role_rng[correct])
+                        text = templated_answer(
+                            it, correct, st, role_rng[correct],
+                            distractor=wrong_answers[ti],
+                        )
                         per_agent[nm] = {"text": text, "correct": correct, "style": st}
                         lines.append(render_turn_line(nm, text))
-                    wrong_text = per_agent[names[1 - accurate_pos]]["text"]
-                    # templated_answer renders exactly f"{core}. {phrase}", so the
-                    # distractor shown is the text before the first ". ". Splitting
-                    # is exact -- a substring `next(...)` match would pick the wrong
-                    # element when one distractor is a substring of another
-                    # (e.g. "12" vs "1812", "Ford" vs "Henry Ford").
-                    distractor_used = str(wrong_text).split(". ", 1)[0]
                     turns.append(
-                        Turn(it.qid, it.question, it.gold, distractor_used, per_agent)
+                        Turn(it.qid, it.question, it.gold, wrong_answers[ti], per_agent)
                     )
                     turn_lines.append(lines)
                 ctx, q, ap = render_transcript(names, turn_lines, query_idx=qpos)
-                assert not _contains_blocklisted(ctx), f"{rid}: blocklisted word in context"
+                _check_context(rid, ctx, turns)
                 agents = [
                     AgentSpec(
                         names[0], 0,
@@ -233,7 +270,7 @@ def build_t3b(
                 turn_lines: list[list[str]] = []
                 for ti, it in enumerate(items):
                     per_agent: dict[str, dict[str, object]] = {}
-                    lines = []
+                    lines = [render_question_line(ti, it.question)]
                     distractor_used = ""
                     for pos, nm in enumerate(names):
                         correct = pos == accurate_pos
@@ -252,6 +289,7 @@ def build_t3b(
                     )
                     turn_lines.append(lines)
                 ctx, q, ap = render_transcript(names, turn_lines, query_idx=qpos)
+                _check_context(rid, ctx, turns)
                 agents = [
                     AgentSpec(
                         names[0], 0,

@@ -39,6 +39,32 @@ def test_is_clean_rejects_gold_equal_to_distractor():
     assert not is_clean(item)
 
 
+def test_is_clean_rejects_blocklist_word_in_gold():
+    # a trait word in `gold` reaches `context` via the accurate agent's turn and
+    # would trip the T3 context invariant mid-build.
+    item = QAItem("q1", "science", "Who reviews it?", "A senior reviewer", ["A machine"])
+    assert not is_clean(item)
+
+
+def test_is_clean_rejects_blocklist_word_in_distractor():
+    item = QAItem("q1", "science", "Who reviews it?", "A machine", ["An expert panel"])
+    assert not is_clean(item)
+
+
+def test_is_clean_rejects_blocklist_word_in_question():
+    # the question is rendered as the turn's `Qn:` header, so it lands in
+    # `context` too.
+    item = QAItem("q1", "science", "Is the student correct?", "Yes", ["No"])
+    assert not is_clean(item)
+
+
+def test_is_clean_blocklist_match_is_whole_word():
+    # "experts" / "studentship" are not blocklist tokens; whole-word matching
+    # must not over-reject on substrings of legitimate answers.
+    item = QAItem("q1", "science", "What is expertise?", "Deep skill", ["Luck"])
+    assert is_clean(item)
+
+
 def test_is_clean_accepts_short_unique_gold():
     item = QAItem("q1", "history", "When?", "1814", ["1812", "1815", "1820"])
     assert is_clean(item)

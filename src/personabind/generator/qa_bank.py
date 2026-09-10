@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from personabind.generator.traits import contains_blocklisted
+
 DOMAINS: tuple[str, ...] = ("science", "history", "medicine", "law")
 
 # MMLU subject -> our domain. Unlisted subjects are skipped.
@@ -70,6 +72,17 @@ def is_clean(item: QAItem) -> bool:
     # >= 1 distractor
     if not item.distractors:
         return False
+    # No trait/seniority word anywhere that can reach the rendered transcript.
+    # The question, gold and every distractor all land in `context` (the question
+    # via the `Qn:` line, the answers via the agent turns), so a blocklisted word
+    # in ANY of them would trip the T3 context invariant mid-build. Filtering the
+    # item out here is the only place that can prevent that.
+    if contains_blocklisted(item.question):
+        return False
+    if contains_blocklisted(g):
+        return False
+    if any(contains_blocklisted(d) for d in item.distractors):
+        return False
     # gold distinct (case-insensitively) from every distractor
     gold_key = g.strip().lower()
     return all(d.strip().lower() != gold_key for d in item.distractors)
@@ -88,7 +101,8 @@ def _load_source(source: str, cache_dir: str, limit: int | None) -> list[QAItem]
             if limit and len(items) >= limit:
                 break
     elif source == "sciq":
-        ds = load_dataset("sciq", split="train", cache_dir=cache_dir)
+        # namespaced id: the bare "sciq" alias no longer resolves on the Hub.
+        ds = load_dataset("allenai/sciq", split="train", cache_dir=cache_dir)
         for row in ds:
             distractors = [row["distractor1"], row["distractor2"], row["distractor3"]]
             items.append(QAItem(_next_qid("sciq"), "science",
