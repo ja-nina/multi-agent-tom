@@ -52,6 +52,8 @@ def clopper_pearson_ci(k: int, n: int, confidence: float = 0.95) -> tuple[float,
 
 
 def aggregate_accuracy(results: list[AccuracyResult]) -> dict:
+    if not results:
+        raise ValueError("aggregate_accuracy: results is empty")
     n = len(results)
     k = sum(r.correct for r in results)
     ci_low, ci_high = clopper_pearson_ci(k, n)

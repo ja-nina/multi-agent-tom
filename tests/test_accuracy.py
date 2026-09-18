@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+import pytest
 import torch
 
 from personabind.binding.accuracy import (
@@ -66,3 +69,36 @@ def test_aggregate_accuracy_computes_rate_and_ci():
     assert agg["n"] == 10
     assert agg["accuracy"] == 0.9
     assert agg["ci_low"] < 0.9 < agg["ci_high"]
+
+
+def test_accuracy_full_string_not_first_token_diverging():
+    """Test that correct comparison requires full-string match, not just first-token match."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    # Gold: "first-year student", Predicted: "first-class citizen"
+    # Same first token but diverging later
+    record = _record(answer="first-year student")
+    with patch("personabind.binding.accuracy.greedy_decode", return_value="first-class citizen"):
+        results = run_accuracy(handle, [record], seed=1)
+    assert len(results) == 1
+    assert results[0].gold == "first-year student"
+    assert results[0].predicted == "first-class citizen"
+    assert results[0].correct is False
+
+
+def test_accuracy_full_string_exact_match_after_normalization():
+    """Test that correct comparison accepts exact match after case/whitespace normalization."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="Expert")
+    # Predicted has different case and extra whitespace
+    with patch("personabind.binding.accuracy.greedy_decode", return_value="  EXPERT  "):
+        results = run_accuracy(handle, [record], seed=1)
+    assert len(results) == 1
+    assert results[0].gold == "Expert"
+    assert results[0].predicted == "  EXPERT  "
+    assert results[0].correct is True
+
+
+def test_aggregate_accuracy_raises_on_empty_results():
+    """Test that aggregate_accuracy raises ValueError (not ZeroDivisionError) on empty results."""
+    with pytest.raises(ValueError, match="aggregate_accuracy: results is empty"):
+        aggregate_accuracy([])
