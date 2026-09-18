@@ -68,6 +68,10 @@ export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"     # set 1 only if gpu17 is air-gapped (prefetch first)
 export TOKENIZERS_PARALLELISM=false
 
+# See build_t3b.sbatch: FlashInfer's sampler needs nvcc to JIT-compile,
+# which is often missing from a conda/mamba env's CUDA runtime. Default off.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+
 NODE_HOST="$(hostname -f 2>/dev/null || hostname)"
 ENDPOINT="http://${NODE_HOST}:${PORT}/v1"
 ENDPOINT_FILE="slurm/vllm.${SLURM_JOB_ID}.endpoint"

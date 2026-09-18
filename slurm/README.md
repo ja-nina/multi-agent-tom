@@ -74,6 +74,16 @@ sbatch --partition=gpu22 --time=12:00:00 slurm/build_t3b.sbatch qwen3-8b
 
 ## Notes
 
+- **FlashInfer sampler needs `nvcc`.** vLLM defaults to FlashInfer for
+  top-k/top-p sampling, which JIT-compiles a CUDA kernel on first use. If
+  your vLLM env's CUDA install has the runtime but not the `nvcc` compiler
+  package, the engine crashes *after* the model has already loaded with
+  `RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda'
+  doesn't exist`. The scripts default to `VLLM_USE_FLASHINFER_SAMPLER=0`
+  (built-in PyTorch sampler instead) to sidestep it — irrelevant for our
+  throughput. To get FlashInfer's sampler back: `mamba install -n <vllm env>
+  -c nvidia cuda-nvcc`, then `export VLLM_USE_FLASHINFER_SAMPLER=1` at submit
+  time.
 - **Sequential client.** `personabind` calls the backend one turn at a time
   in a Python loop, so throughput is round-trip-latency bound, not
   GPU-bound — the GPU mostly idles. 2000 records × ~2 turns × up to 5

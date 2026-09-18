@@ -94,6 +94,16 @@ export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 export TOKENIZERS_PARALLELISM=false
 
+# FlashInfer's top-k/top-p sampler JIT-compiles a CUDA kernel via nvcc on
+# first use. Nodes whose conda/mamba env has the CUDA runtime but not the
+# nvcc compiler package fail here ("Could not find nvcc and default
+# cuda_home='/usr/local/cuda' doesn't exist"), well after the model has
+# already loaded. Default to the built-in PyTorch sampler instead -- our
+# client is sequential/low-throughput, so the speed difference is moot.
+# Unset (VLLM_USE_FLASHINFER_SAMPLER=1) once `mamba install -c nvidia
+# cuda-nvcc` has been run in the vLLM env, if you want it back.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+
 OUT="data/t3b_inferred_llm.jsonl"
 if [ -f "$OUT" ]; then
     echo "[skip] $OUT already exists -- rename or delete it to rebuild. Exiting."
