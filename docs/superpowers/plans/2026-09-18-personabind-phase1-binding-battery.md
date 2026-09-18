@@ -522,6 +522,7 @@ Claude-Session: https://claude.ai/code/session_01NahphNHdNrFpTanf7v4RgT"
   - `query_agent_position(tokenized: TokenizedPrompt, record: Record) -> int`
   - `stored_position(tokenized: TokenizedPrompt, record: Record, agent: str) -> int`
   - `render_query_for(record: Record, other_agent: str) -> tuple[str, str]`
+  - `trait_of(record: Record, agent_name: str) -> str` — added during pre-flight review (see the SDD ledger); Tasks 7 and 9 need "what is this OTHER agent's own trait in this record," which `record.answer` cannot answer (it only reflects `record.query_agent`).
 
 **One implementation refinement beyond the spec's prose, needed for correctness:** the spec's `stored_position` description says "extend the trait span backward to include the article." That's exactly right for `same_sentence` (`"Doug is an expert"` — an indefinite article that varies with the trait). For `split_sentence`, the assignment sentence is `"The {trait} is {name}."` — a *definite* article ("The") that does NOT vary with the trait, so there is nothing to extend backward into; the trait phrase alone is already the complete divergence unit there. `trait_spans` below is format-aware for exactly this reason — it locates the trait phrase via the full grammatical pattern per format, not a bare substring search (a bare search for `"{trait}"` alone would match the *wrong*, non-divergent occurrence in `split_sentence`'s intro sentence, which lists both traits regardless of who has which).
 
@@ -848,12 +849,32 @@ def render_query_for(record: Record, other_agent: str) -> tuple[str, str]:
         return question, answer_prefix
     other = next(a for a in record.agents if a.name == other_agent)
     return f"How reliable is {other.name}?", f"{other.name} is"
+
+
+def trait_of(record: Record, agent_name: str) -> str:
+    """The value `agent_name` is bound to in `record`, read from agents[].trait --
+    the source of truth for "what does this record say about this agent",
+    independent of who record.query_agent/record.answer happen to be. Tasks 7
+    and 9 both need this for off-target measurement: record.answer only ever
+    reflects the record's OWN query_agent, not whichever other agent a
+    re-rendered question asks about."""
+    return next(a.trait for a in record.agents if a.name == agent_name)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_positions.py -v`
-Expected: PASS (11 tests).
+Expected: PASS (12 tests, after adding the test below).
+
+Add this test to `tests/test_positions.py` alongside the others (Step 1 above already lists 11; this is the 12th, added here since `trait_of` was a pre-flight addition made after the rest of the file's tests were written):
+```python
+def test_trait_of_reads_the_named_agents_own_trait():
+    from personabind.binding.positions import trait_of
+
+    record = _t2_split_sentence()
+    assert trait_of(record, "Doug") == "board-certified expert"
+    assert trait_of(record, "Charles") == "first-year student"
+```
 
 - [ ] **Step 5: Commit**
 
@@ -1207,7 +1228,7 @@ Claude-Session: https://claude.ai/code/session_01NahphNHdNrFpTanf7v4RgT"
 - Test: `tests/test_factorizability.py`
 
 **Interfaces:**
-- Consumes: `common.activations.{ModelHandle, forward_logits, read_residual, patch_residual}`; `common.controls.random_direction_matched_norm`; `binding.positions.{tokenize_record, stored_position, query_agent_position, answer_position, render_query_for}`; `binding.results.InterventionResult`.
+- Consumes: `common.activations.{ModelHandle, forward_logits, read_residual, patch_residual}`; `common.controls.random_direction_matched_norm`; `binding.positions.{tokenize_record, stored_position, query_agent_position, answer_position, render_query_for, trait_of}`; `binding.results.InterventionResult`.
 - Produces: `run_factorizability(handle, record_pairs: list[tuple[Record, Record]], layers: list[int], seed: int, config_hash: str) -> list[InterventionResult]` — one result per `(record-pair, layer, patch_site)`, where `patch_site ∈ {"stored", "retrieved"}`.
 
 **The core mechanic (spec §7):** for a `(base, twin)` pair sharing the same `query_agent`, save the twin's activation at a layer/position, patch it into the base at the same layer/position, and measure the shift in log-probability of the twin's gold answer's first token — always alongside a random-direction baseline at the same site, and (for `"stored"` only) an off-target measurement from a re-rendered question.
@@ -1295,6 +1316,7 @@ from personabind.binding.positions import (
     render_query_for,
     stored_position,
     tokenize_record,
+    trait_of,
 )
 from personabind.binding.results import InterventionResult
 from personabind.common.activations import ModelHandle, forward_logits, patch_residual, read_residual
@@ -1332,24 +1354,27 @@ def run_factorizability(
         other_agent = next(a.name for a in base.agents if a.name != base.query_agent)
         other_q, other_ap = render_query_for(base, other_agent)
         other_base = base.__class__(**{**base.__dict__, "question": other_q, "answer_prefix": other_ap})
-        other_twin = twin.__class__(**{**twin.__dict__, "question": other_q, "answer_prefix": other_ap})
         other_base_tok = tokenize_record(other_base, handle._tokenizer)
-        other_twin_tok = tokenize_record(other_twin, handle._tokenizer)
         other_base_ids = torch.tensor([other_base_tok.input_ids])
 
-        target_token_id = _first_gold_token_id(handle, twin.answer)
-        other_target_token_id = _first_gold_token_id(handle, other_twin.answer)
+        # other_base's CONTEXT is byte-identical to base's (only question/answer_prefix,
+        # which come after it in the text, differ) -- so any position resolved inside the
+        # context (stored_position) is the same absolute token index in both tokenizations.
+        # No need to re-resolve it against other_base_tok.
+        target_token_id = _first_gold_token_id(handle, trait_of(twin, twin.query_agent))
+        other_target_token_id = _first_gold_token_id(handle, trait_of(twin, other_agent))
 
         clean_logits = forward_logits(handle, base_ids)
         clean_logprob = _logprob_of_token(clean_logits, target_token_id)
+        other_clean_logits = forward_logits(handle, other_base_ids)
+        other_clean_logprob = _logprob_of_token(other_clean_logits, other_target_token_id)
 
         for layer in layers:
-            for patch_site, base_pos, twin_pos, other_pos in (
+            for patch_site, base_pos, twin_pos in (
                 ("stored", stored_position(base_tok, base, base.query_agent),
-                 stored_position(twin_tok, twin, twin.query_agent),
-                 stored_position(other_base_tok, other_base, base.query_agent)),
+                 stored_position(twin_tok, twin, twin.query_agent)),
                 ("retrieved", query_agent_position(base_tok, base),
-                 query_agent_position(twin_tok, twin), None),
+                 query_agent_position(twin_tok, twin)),
             ):
                 seed_i = seed + pair_idx * 1000 + layer
                 twin_activation = read_residual(handle, twin_ids, layer, twin_pos)
@@ -1365,13 +1390,11 @@ def run_factorizability(
                 effect_off_target = None
                 read_off_target = None
                 if patch_site == "stored":
-                    other_clean_logits = forward_logits(handle, other_base_ids)
-                    other_clean_logprob = _logprob_of_token(other_clean_logits, other_target_token_id)
                     effect_off_target = _measure(
-                        handle, other_base_ids, layer, other_pos, twin_activation,
+                        handle, other_base_ids, layer, base_pos, twin_activation,
                         other_target_token_id, other_clean_logprob,
                     )
-                    read_off_target = other_pos
+                    read_off_target = answer_position(other_base_tok)
 
                 results.append(InterventionResult(
                     test="factorizability", record_id=base.id, model=handle.model_id,
@@ -1595,7 +1618,7 @@ Claude-Session: https://claude.ai/code/session_01NahphNHdNrFpTanf7v4RgT"
 - Test: `tests/test_mean_intervention.py`
 
 **Interfaces:**
-- Consumes: `common.activations.{ModelHandle, forward_logits, read_residual, patch_residual}`; `common.controls.random_direction_matched_norm`; `binding.positions.{tokenize_record, stored_position, render_query_for}`; `binding.results.InterventionResult`; `binding.position_test._fit_diff_means`, `_split_train_test` (reused, not reimplemented).
+- Consumes: `common.activations.{ModelHandle, forward_logits, read_residual, patch_residual}`; `common.controls.random_direction_matched_norm`; `binding.positions.{tokenize_record, stored_position, render_query_for, answer_position, trait_of}`; `binding.results.InterventionResult`; `binding.position_test._fit_diff_means`, `_read_activation`, `_split_train_test` (reused, not reimplemented).
 - Produces: `run_mean_intervention(handle, records: list[Record], trait_contrast: tuple[str, str], layers: list[int], coefficients: list[float], train_fraction: float, seed: int, config_hash: str) -> list[InterventionResult]`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1666,7 +1689,7 @@ from __future__ import annotations
 import torch
 
 from personabind.binding.position_test import _fit_diff_means, _read_activation, _split_train_test
-from personabind.binding.positions import answer_position, render_query_for, stored_position, tokenize_record
+from personabind.binding.positions import answer_position, render_query_for, stored_position, tokenize_record, trait_of
 from personabind.binding.results import InterventionResult
 from personabind.common.activations import ModelHandle, forward_logits, patch_residual
 from personabind.common.controls import random_direction_matched_norm
@@ -1706,7 +1729,7 @@ def run_mean_intervention(
             tokenized = tokenize_record(record, handle._tokenizer)
             input_ids = torch.tensor([tokenized.input_ids])
             pos = stored_position(tokenized, record, record.query_agent)
-            clean_activation = handle_read = _read_activation(handle, record, layer)
+            clean_activation = _read_activation(handle, record, layer)
             target_token_id = _first_token_id(handle, opposite_trait)
 
             clean_logits = forward_logits(handle, input_ids)
@@ -1717,11 +1740,15 @@ def run_mean_intervention(
             other_record = record.__class__(**{**record.__dict__, "question": other_q, "answer_prefix": other_ap})
             other_tok = tokenize_record(other_record, handle._tokenizer)
             other_ids = torch.tensor([other_tok.input_ids])
-            other_pos = stored_position(other_tok, other_record, record.query_agent)
+            # other_record's CONTEXT is byte-identical to record's (only question/
+            # answer_prefix, which come after it, differ) -- `pos` is the same
+            # absolute token index in both tokenizations; no need to re-resolve it.
             other_clean_logits = forward_logits(handle, other_ids)
-            other_opposite = low_trait if other_record.answer == high_trait else high_trait
+            other_own_trait = trait_of(record, other_agent)
+            other_opposite = low_trait if other_own_trait == high_trait else high_trait
             other_target_token_id = _first_token_id(handle, other_opposite)
             other_clean_logprob = _logprob_of_token(other_clean_logits, other_target_token_id)
+            other_read_pos = answer_position(other_tok)
 
             for coefficient in coefficients:
                 seed_i = seed + layer * 100 + int(coefficient * 10)
@@ -1735,7 +1762,7 @@ def run_mean_intervention(
                 random_logits = patch_residual(handle, input_ids, layer, pos, random_vector)
                 effect_baseline = _logprob_of_token(random_logits, target_token_id) - clean_logprob
 
-                other_patched_logits = patch_residual(handle, other_ids, layer, other_pos, patched_vector)
+                other_patched_logits = patch_residual(handle, other_ids, layer, pos, patched_vector)
                 effect_off_target = (
                     _logprob_of_token(other_patched_logits, other_target_token_id) - other_clean_logprob
                 )
@@ -1744,7 +1771,7 @@ def run_mean_intervention(
                     test="mean_intervention", record_id=record.id, model=handle.model_id,
                     variant=record.variant, layer=layer, layer_type="full_attention",
                     patch_site="stored",
-                    token_positions={"patched": pos, "read_on_target": answer_position(tokenized), "read_off_target": other_pos},
+                    token_positions={"patched": pos, "read_on_target": answer_position(tokenized), "read_off_target": other_read_pos},
                     effect_on_target=effect_on_target, effect_norm_matched_random=effect_baseline,
                     effect_off_target=effect_off_target, coefficient=coefficient,
                     direction_norm_fraction=direction_norm_fraction, train_test_split="test",
@@ -2511,3 +2538,5 @@ No gaps found.
 - `patch_site` values are the closed set `{"stored", "retrieved"}` everywhere (Tasks 5, 6 n/a, 7, 9) — Task 9 never emits `"retrieved"`, consistent with spec §7's "test 4 uses stored only."
 
 One fix made during this review: Task 11's first draft of `run_battery` left in a dead intermediate variable (`base_records = ...`) from working out the sampling logic — flagged explicitly in Task 11 Step 4 as something to delete before committing, rather than silently leaving inconsistent-looking dead code for the implementer to puzzle over.
+
+**A correctness bug found and fixed during the SDD pre-flight scan (before any task was dispatched):** Tasks 7 and 9's off-target measurement read `other_twin.answer` / `other_record.answer` after constructing a copy of the record with the question re-rendered for the *other* agent. `record.answer` only ever reflects the record's own `query_agent` — copying the object and changing its question does not update `.answer` to the other agent's own trait, so the off-target target-token lookup was silently wrong (comparing against the wrong agent's answer, or a leftover value from before the copy). Fixed by adding `positions.trait_of(record, agent_name)` (reads `agents[].trait` directly — the real source of truth, correct regardless of who's being queried) and using it everywhere an *other* agent's own value is needed, in both tasks. The same pass also caught that the off-target patch/read positions were being re-resolved against the "other" record's own tokenization via `stored_position(...)`, when the correct position is simply the original `pos`/`base_pos` (the shared context is byte-identical up to the question, so the token index is the same in both tokenizations) with the read position at the *other* prompt's `answer_position` — not another `stored_position` call. Both fixes are reflected directly in Tasks 4 (added `trait_of`), 7, and 9's code above; nothing further to do at dispatch time.
