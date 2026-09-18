@@ -25,7 +25,7 @@ def test_read_residual_returns_correct_shape():
     tokenizer = handle._tokenizer
     ids = tokenizer("hello world", return_tensors="pt").input_ids
     act = read_residual(handle, ids, layer=0, token_pos=ids.shape[1] - 1)
-    assert act.shape == (handle.hidden_size,) or act.shape[-1] == handle.hidden_size
+    assert act.shape == (handle.hidden_size,)
 
 
 def test_patch_residual_changes_logits():
