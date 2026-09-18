@@ -104,7 +104,8 @@ def run_factorizability(
 
                 results.append(InterventionResult(
                     test="factorizability", record_id=base.id, model=handle.model_id,
-                    variant=base.variant, layer=layer, layer_type="full_attention",
+                    variant=base.variant, layer=layer,
+                    layer_type=handle.layer_types[layer] if handle.layer_types else "full_attention",
                     patch_site=patch_site,
                     token_positions={"patched": base_pos, "read_on_target": answer_position(base_tok), "read_off_target": read_off_target},
                     effect_on_target=effect_on_target, effect_norm_matched_random=effect_baseline,
