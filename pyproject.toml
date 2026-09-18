@@ -16,6 +16,10 @@ dependencies = [
     "pyyaml",
     "openai",
     "tqdm",
+    "torch",
+    "transformers",
+    "nnsight",
+    "nnterp",
 ]
 
 [project.scripts]
