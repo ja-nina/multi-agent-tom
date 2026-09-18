@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=personabind-t3b
-#SBATCH --array=0-20%10
+#SBATCH --array=0-2%10
 #SBATCH -p gpu-a100
 #SBATCH -c 10
 #SBATCH --gres=gpu:1
