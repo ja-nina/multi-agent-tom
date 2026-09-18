@@ -30,6 +30,14 @@ def test_random_direction_matches_dtype_and_shape():
     assert d.dtype == ref.dtype
 
 
+def test_random_direction_preserves_device():
+    # Test with explicitly CPU device to verify device is preserved
+    ref = torch.randn(16, device=torch.device("cpu"))
+    d = random_direction_matched_norm(ref, seed=1)
+    assert d.device == ref.device
+    assert d.dtype == ref.dtype
+
+
 def test_shuffle_labels_is_deterministic():
     labels = ["a", "b"] * 5
     assert shuffle_labels(labels, seed=3) == shuffle_labels(labels, seed=3)

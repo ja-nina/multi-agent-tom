@@ -1,10 +1,9 @@
-import transformers
 
 
 def test_new_deps_importable():
-    import nnsight   # noqa: F401
-    import nnterp    # noqa: F401
-    import torch      # noqa: F401
+    import nnsight  # noqa: F401
+    import nnterp  # noqa: F401
+    import torch  # noqa: F401
 
 
 def test_transformers_recognizes_qwen3():

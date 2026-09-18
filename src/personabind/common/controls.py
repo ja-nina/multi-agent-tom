@@ -12,7 +12,7 @@ def random_direction_matched_norm(reference: torch.Tensor, seed: int) -> torch.T
     magnitude produces a comparable shift, the "real" effect is an
     interpretability illusion, not evidence of binding."""
     rng = torch.Generator().manual_seed(seed)
-    direction = torch.randn(reference.shape, generator=rng, dtype=torch.float32).to(reference.dtype)
+    direction = torch.randn(reference.shape, generator=rng, dtype=torch.float32).to(device=reference.device, dtype=reference.dtype)
     direction_norm = direction.norm()
     if direction_norm == 0:
         raise ValueError("sampled a zero-norm random direction; retry with a different seed")
