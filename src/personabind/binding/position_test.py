@@ -21,12 +21,24 @@ def _classify(activation: torch.Tensor, direction: torch.Tensor, midpoint: float
 
 
 def _split_train_test(items: list, train_fraction: float, seed: int) -> tuple[list, list]:
+    """Split `items` into train/test by whole base/twin record-pair, never by
+    individual record. Each record's `counterfactual_id` cross-references the
+    OTHER member of its pair's `id` (base.counterfactual_id == twin.id and vice
+    versa), so `min(r.id, r.counterfactual_id)` is an identical key for both
+    members -- grouping on it and shuffling/splitting whole groups guarantees a
+    base and its twin always land on the same side of the split."""
     import random
 
-    shuffled = list(items)
-    random.Random(seed).shuffle(shuffled)
-    cut = int(len(shuffled) * train_fraction)
-    return shuffled[:cut], shuffled[cut:]
+    groups: dict[str, list] = {}
+    for r in items:
+        key = min(r.id, r.counterfactual_id)
+        groups.setdefault(key, []).append(r)
+    group_keys = list(groups.keys())
+    random.Random(seed).shuffle(group_keys)
+    cut = int(len(group_keys) * train_fraction)
+    train = [r for k in group_keys[:cut] for r in groups[k]]
+    test = [r for k in group_keys[cut:] for r in groups[k]]
+    return train, test
 
 
 def _read_activation(handle: ModelHandle, record, layer: int) -> torch.Tensor:
@@ -63,6 +75,12 @@ def run_position_test(
             train_acts = [_read_activation(handle, r, layer) for r in train_recs]
             train_high = [a for r, a in zip(train_recs, train_acts) if r.answer == high_trait]
             train_low = [a for r, a in zip(train_recs, train_acts) if r.answer == low_trait]
+            if not train_high or not train_low:
+                raise ValueError(
+                    f"run_position_test: training fold for fit_position={fit_position}, layer={layer} "
+                    f"contains only one trait level ({len(train_high)} high, {len(train_low)} low) -- "
+                    "cannot fit a difference-in-means direction. Increase train_fraction or sample size."
+                )
             direction, midpoint = _fit_diff_means(train_high, train_low)
 
             same_acts = [_read_activation(handle, r, layer) for r in test_recs_same]
@@ -73,14 +91,20 @@ def run_position_test(
             shuffled_answers = shuffle_labels([r.answer for r in train_recs], seed + layer + 1)
             shuf_high = [a for r_ans, a in zip(shuffled_answers, train_acts) if r_ans == high_trait]
             shuf_low = [a for r_ans, a in zip(shuffled_answers, train_acts) if r_ans == low_trait]
-            shuf_direction, shuf_midpoint = _fit_diff_means(shuf_high, shuf_low) if shuf_high and shuf_low else (direction, midpoint)
+            # shuffle_labels is a permutation of train_recs' labels, and train_high/train_low
+            # were just proven non-empty above, so shuf_high/shuf_low are guaranteed non-empty too.
+            shuf_direction, shuf_midpoint = _fit_diff_means(shuf_high, shuf_low)
             shuffled_control_acc = _accuracy(test_recs_same, same_acts, shuf_direction, shuf_midpoint, high_trait)
 
             results.append(PositionGeneralizationResult(
                 model=handle.model_id, variant=records[0].variant if records else "", layer=layer,
                 trait_contrast=contrast_label, fit_position=fit_position,
                 same_position_accuracy=same_acc, cross_position_accuracy=cross_acc,
-                position_invariance_ratio=(cross_acc / same_acc) if same_acc > 0 else 0.0,
+                # same_acc == 0 means the fitted direction failed entirely on its own held-out
+                # same-position set -- a distinct, more informative failure than genuine
+                # zero-invariance. Use NaN so callers must check for it explicitly rather than
+                # silently treating it as a real (and misleadingly identical) zero ratio.
+                position_invariance_ratio=(cross_acc / same_acc) if same_acc > 0 else float("nan"),
                 shuffled_label_control_accuracy=shuffled_control_acc,
                 n_train=len(train_recs), n_test=len(test_recs_same), seed=seed + layer, config_hash=config_hash,
             ))
