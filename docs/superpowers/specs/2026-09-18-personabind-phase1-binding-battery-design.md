@@ -50,7 +50,7 @@ From brainstorming, three approaches were considered for activation access:
 src/personabind/
 ├── common/
 │   ├── activations.py       # model loading, layer resolution, read/patch (nnterp-backed, with fallback)
-│   └── controls.py           # norm-matched random direction, off-target/capability-retention helpers
+│   └── controls.py           # norm-matched random direction, shuffled-label control, off-target helpers
 ├── binding/
 │   ├── __init__.py
 │   ├── positions.py          # Record -> token positions (agent-name spans, trait spans, answer position)
@@ -62,8 +62,7 @@ src/personabind/
 │   └── report.py             # aggregation, confidence intervals, entanglement flag, plots
 └── cli.py                    # MODIFY: add `binding run` / `binding report` subcommands
 configs/
-├── binding.yaml               # models, variants, sample size, layer sweep, thresholds, seed
-└── canary_qa.jsonl            # small fixed general-QA set for capability_retention
+└── binding.yaml               # models, variants, sample size, layer sweep, thresholds, seed
 slurm/
 └── run_binding_battery.sbatch
 results/
@@ -127,17 +126,38 @@ def answer_position(tokenized: TokenizedPrompt) -> int
 def query_agent_position(tokenized: TokenizedPrompt, record: Record) -> int
     # the query_agent's name span specifically inside `question`
 
+def stored_position(tokenized: TokenizedPrompt, record: Record, agent: str) -> int
+    # T1/T2: last token of trait_spans[agent], EXTENDED BACKWARD to include the
+    #   preceding article ("a"/"an") -- the article is picked to agree with the
+    #   trait, so it is itself part of the divergence between a record and its
+    #   twin, not innocent framing text (see the note on causal validity below).
+    # T3a/T3b: the last token of the agent's LAST turn-speaker-label ("Doug:")
+    #   -- requires turns_per_transcript >= 2; raises if a transcript has only
+    #   one turn, since then there IS no post-divergence mention (same failure
+    #   mode as same_sentence T1/T2, see below).
+
 def render_query_for(record: Record, other_agent: str) -> tuple[str, str]
     # (question, answer_prefix) re-rendered as if `other_agent` were query_agent,
-    # by calling Phase 0's own schema.render_stated/render_transcript with the
-    # same context/agents and a different query_idx. Needed for off-target
+    # by calling Phase 0's own schema.render_stated (T1/T2) or by substituting
+    # the name directly (T3 -- the transcript itself doesn't depend on who is
+    # queried, only the trailing question does). Needed for off-target
     # measurement (§7): "does patching agent A's binding also move what the
-    # model reports about agent B" requires literally asking about B.
+    # model reports about agent B" requires literally asking about B, from the
+    # SAME patched context state.
 ```
 
-**One convention used everywhere below, stated once instead of per-test:** whenever a test reads or patches "the entity's position" or "the attribute's position," and the resolved span covers more than one token (a multi-subword name, a multi-word trait phrase), the position used is **the last token of that span** — the point by which attention has had the chance to aggregate the whole phrase. This also sidesteps a real problem: `agent_spans`/`trait_spans` return spans of different *lengths* between a base record and its twin whenever the swapped phrases tokenize to different token counts (e.g. T2's `"first-year student"` vs `"board-certified expert"`) — patching only ever targets one aligned token per side, never a variable-length span-to-span copy.
+### Causal validity: why there are two different positions, not one
 
-Every span-finder **raises** (naming the record id) if it finds zero matches — a silently-empty match is exactly the failure mode ("patched the wrong token position, got a plausible-looking wrong number") this whole design exists to prevent. `tests/test_positions.py` decodes a sample of resolved spans back to text and asserts they equal the expected substring, so a human can see what was actually read/patched, not just trust an offset.
+A transformer is autoregressive: the hidden state at any token position is a function of that token and everything *before* it, never anything after. This has a sharp, non-negotiable consequence for patching: **a position can only carry a patchable difference between a base record and its twin if it sits at or after the point where their text actually diverges.** A position before that point is, at every layer, mathematically identical between the two — patching it is patching an identical value into itself, a guaranteed no-op, not a weak effect.
+
+This is sharper than it first looks. For same-sentence T1 (`"Doug is an expert; Charles is a novice."` vs `"Doug is a novice; Charles is an expert."`), the *first* mention of `"Doug"` sits **before** the divergence — the text up to and including that token is byte-identical in both records. Patching there tells you nothing about binding; it can't tell you anything, structurally. The divergence starts one token earlier than it looks, too: the article (`"an"` vs `"a"`) is picked to agree with the trait, so it's part of what differs, not innocent framing.
+
+Two positions survive this constraint, and they answer different questions:
+
+- **`stored_position`** — the trait phrase itself (plus its article), where the record's text actually diverges from its twin. Always valid, in every format and variant, because it's the divergence point by construction. Exists *before* any question is posed, which is what makes off-target measurement possible: patch it once, then render *two* different questions (about the patched agent, and about the other agent) off that one patched state.
+- **`query_agent_position`** — the agent's re-mention inside the question (`"How reliable is Doug?"`), always after the *entire* context regardless of format. A second, independent check: does the effect also show up at the point of retrieval, not only where the fact was stored? But because the question is agent-specific, there's no way to ask about a *different* agent from a state patched at *this* agent's query mention — off-target is not measurable here, and the schema says so explicitly (§6) rather than reporting a number that isn't meaningful.
+
+Every span-finder **raises** (naming the record id) if it finds zero matches — a silently-empty match is exactly the failure mode this whole design exists to prevent. `tests/test_positions.py` decodes a sample of resolved spans back to text and asserts they equal the expected substring, so a human can see what was actually read/patched, not just trust an offset.
 
 ---
 
@@ -168,17 +188,22 @@ class InterventionResult:
     variant: str
     layer: int
     layer_type: str                     # "full_attention" (only value used in this phase)
-    patch_site: str                     # "entity" | "attribute" (attribute only for T1/T2)
-    token_positions: dict                # {"patched": int, "read_on_target": int, "read_off_target": int}
+    patch_site: str                     # "stored" | "retrieved" — see §5's causal-validity note
+    token_positions: dict                # {"patched": int, "read_on_target": int, "read_off_target": int | None}
     effect_on_target: float
     effect_norm_matched_random: float    # REQUIRED, no default — cannot construct a result without it
-    effect_off_target: float
-    capability_retention: float
-    coefficient: float
+    effect_off_target: float | None      # REQUIRED (not None) when patch_site == "stored";
+                                          # always None when patch_site == "retrieved" — not measurable
+                                          # there (§5), stated explicitly rather than omitted or faked
+    coefficient: float                   # test 4 only; 1.0 (unused) for test 2
+    direction_norm_fraction: float | None # test 4 only: ||direction|| / mean(||residual activation||) at
+                                          # this layer — reported so "coefficient=1.0" is checkable against
+                                          # spec 5.1's warning never to assume a steering magnitude is sane
     train_test_split: str                # "n/a" for test 2; "train" | "test" for test 4 (see §7)
     seed: int
     config_hash: str
 ```
+(No `capability_retention` field. interp-discipline's minimum schema includes it for *persistent* interventions — a steering vector added across a whole generation, which is Phase 4's job. Every patch here is scoped to one forward pass for one record; there is no general capability for an unrelated canary prompt to lose, because the canary is never touched. Capability retention becomes a real, checkable control starting Phase 4, not here — noted so its absence reads as a deliberate scope decision, not an oversight.)
 
 **`PositionGeneralizationResult`** (test 3 — a cross-position classification check, not a patch; its own baseline is a shuffled-label control, not a random direction):
 ```python
@@ -221,25 +246,32 @@ No layer, no patching. For every one of the `2 * sample_size` sampled records (b
 
 ### Test 2 — factorizability (`factorizability.py`)
 
-Uses the counterfactual pair directly. Base and twin share identical `context` up to the point their trait assignment diverges, identical `names`/`positions`/`question`, and — critically — **the same `query_agent`** (Task 7's builder keeps `qpos` fixed between a base and its twin), so "How reliable is Doug?" is asked of both; only the gold answer differs (base: Doug's trait; twin: Doug's *other* trait).
+Uses the counterfactual pair directly. Base and twin share identical `names`/`positions`/`question`, and — critically — **the same `query_agent`** (Task 7's builder keeps `qpos` fixed between a base and its twin), so "How reliable is Doug?" is asked of both; only the trait assignment (and, downstream, the gold answer) differs.
 
-For each layer `L` and each `patch_site` (`"entity"`: the query_agent's last name-token position nearest the binding statement; `"attribute"`: the trait-phrase's last token, T1/T2 only):
-1. Run the **twin** clean; save its residual at `(L, patch_site position)`.
+Run **both** patch sites — they test different claims and both get reported:
+
+**`patch_site = "stored"`** (full on/off-target/baseline; T1/T2 patch the trait phrase + article, T3a/T3b patch the last turn-speaker-label):
+1. Run the **twin** clean; save its residual at `(L, stored_position)`.
 2. Run the **base** clean; record `logprob_base = log P(twin's_gold_first_token | clean base, at answer_position)`.
-3. Run the **base** again, patching the twin's saved activation into `(L, patch_site position)`; record `logprob_patched = log P(twin's_gold_first_token | patched base, at answer_position)`.
+3. Run the **base** again, patching the twin's saved activation into `(L, stored_position)`; record `logprob_patched` the same way.
 4. `effect_on_target = logprob_patched - logprob_base` — how much closer the patched run gets to the counterfactual answer. (First-token log-probability, not a full greedy re-decode — re-decoding at every layer × position × record would be prohibitively expensive; test 1 already established full-string accuracy separately.)
-5. **Off-target:** repeat steps 2–4 but with the question re-rendered for the *other* agent (`positions.render_query_for`), reading `logprob` for that other agent's *own* gold-vs-twin first token instead. `effect_off_target` uses the same formula — did patching Doug's binding also move what the model reports about Charles?
-6. **Baseline:** repeat step 3 with the twin's saved activation replaced by `random_direction_matched_norm(saved_activation, seed)` (a random vector with the same norm) — gives `effect_norm_matched_random`.
-7. **Capability retention:** run the same patched forward pass (from step 3) on the fixed canary prompts (config's `capability_canary_path`) instead of the record's own question; `capability_retention` = accuracy on those, patched vs an unpatched run.
+5. **Off-target:** re-render the question for the *other* agent (`positions.render_query_for`) from that **same patched context** (the patch happened before any question was appended, so both questions can be asked of it); record that other agent's own gold-vs-twin first-token logprob shift the same way. Did patching Doug's stored binding also move what the model reports about Charles?
+6. **Baseline:** repeat step 3 with the twin's saved activation replaced by `random_direction_matched_norm(saved_activation, seed)` → `effect_norm_matched_random`.
+
+**`patch_site = "retrieved"`** (on-target and baseline only — off-target is not measurable here, see §5, and the record says so with `effect_off_target = None` rather than omitting the field):
+1–4 as above, but at `(L, query_agent_position)` instead of `(L, stored_position)`. This checks whether the effect also shows up right at the point of retrieval, as a second, independent line of evidence on top of "stored."
+5. Baseline as above.
 
 One `InterventionResult` per `(record-pair, layer, patch_site)`.
 
 ### Test 3 — position test (`position_test.py`)
 
-Not a patch — a cross-position generalization check on a fitted direction, per Phase 0's C1 property (every entity/trait pairing is emitted once with the queried agent at position 0 and once at position 1 — a fact about how the data was *built*, verifiable directly with `personabind report`, not a prior experimental result).
+Not a patch — a cross-position generalization check on a fitted direction. Reads at `stored_position` (not `query_agent_position` — this test is specifically about whether the *stored* representation is tied to the entity or the slot, so it needs to read where the fact is stored, not where it's later retrieved).
+
+Phase 0's generator guarantees every entity/trait pairing is emitted once with the queried agent at position 0 and once at position 1 — a fact about how `build_stated`'s cell loop *constructs* the data (directly checkable with `personabind report`'s `position_r` metric), not a result from having run anything.
 
 For a chosen `trait_contrast` (T1: `expert` vs `novice`; T2: the top tier vs the bottom tier) and layer `L`:
-1. From the **train** split, take every record where the queried agent is at position 0; read its activation at `(L, query_agent's last-name-token position)`; compute `d0 = mean(activation | trait=high) - mean(activation | trait=low)` — restricted to position-0 examples only.
+1. From the **train** split, take every record where the queried agent is at position 0; read its activation at `(L, stored_position)`; compute `d0 = mean(activation | trait=high) - mean(activation | trait=low)` — restricted to position-0 examples only.
 2. From the **test** split, classify position-0 examples by projecting onto `d0` and thresholding at the midpoint of the two training means → `same_position_accuracy`.
 3. From the **test** split, classify position-1 examples the same way, using the *same* `d0` (fit only on position 0) → `cross_position_accuracy`.
 4. `position_invariance_ratio = cross_position_accuracy / same_position_accuracy`. Near 1 → the direction generalizes across position (binding follows the entity). Near the chance level → the direction only works at the position it was fit on (binding is tracking the syntactic slot — spec §14's named highest-probability risk, made directly measurable rather than asserted).
@@ -249,14 +281,15 @@ One `PositionGeneralizationResult` per `(trait_contrast, layer)`; repeat with `f
 
 ### Test 4 — mean intervention (`mean_intervention.py`)
 
-Also uses a fitted direction, but as a **causal patch** this time, so it reuses `InterventionResult`, not `PositionGeneralizationResult`.
+Also uses a fitted direction, but as a **causal patch** this time, so it reuses `InterventionResult`, not `PositionGeneralizationResult`. Uses `stored_position` only (not "retrieved") — off-target must always be measurable for this test (interp-discipline's baseline-in-every-record rule), and `stored_position` is the site that supports it.
 
-1. From the **train** split, fit `direction = mean(activation | trait=high) - mean(activation | trait=low)` at layer `L`, same read position as test 3 (query_agent's last-name-token), pooling both positions together (unlike test 3, which deliberately keeps them separate).
-2. For each **test**-split record: at `(L, query_agent's position)`, patch `h' = h + coefficient * direction`, signed toward whichever trait value is the *opposite* of that record's actual queried trait (mirroring test 2's "push toward the counterfactual" framing) — `coefficient` defaults to `1.0` (add the estimated mean-difference vector once; a magnitude sweep is Phase 4's steering work, out of scope here).
-3. `effect_on_target = logprob_patched - logprob_clean`, on the first token of the *opposite* trait's surface form — same formula shape as test 2.
-4. Off-target, baseline (`random_direction_matched_norm(direction, seed)`), and capability retention computed exactly as in test 2, steps 5–7.
+1. From the **train** split, fit `direction = mean(activation | trait=high) - mean(activation | trait=low)` at layer `L`, at `stored_position`, pooling both context-positions together (unlike test 3, which deliberately keeps them separate).
+2. **Before intervening, measure `direction_norm_fraction = ||direction|| / mean(||residual activation||)`** at this layer, over the train split — reported in every result row. The plan is explicit (§5.1) that a steering magnitude sane on one layer/model is not sane on another; this number is what makes "coefficient=1.0" checkable rather than assumed.
+3. For each **test**-split record and each `coefficient ∈ {0.5, 1, 2, 4}` (a small sweep, not one guessed value — a real effect should not be missed just because one chosen magnitude happened to be too weak): at `(L, stored_position)`, patch `h' = h + coefficient * direction`, signed toward whichever trait value is the *opposite* of that record's actual queried trait (mirroring test 2's "push toward the counterfactual" framing).
+4. `effect_on_target = logprob_patched - logprob_clean`, on the first token of the *opposite* trait's surface form — same formula shape as test 2.
+5. Off-target (re-rendered question for the other agent, from the same patched context) and baseline (`random_direction_matched_norm(direction, seed)`), computed exactly as in test 2's `"stored"` arm, steps 5–6.
 
-One `InterventionResult` per `(record, layer)`, `patch_site` fixed to `"entity"` (there is no fitted "attribute direction" in this test), `train_test_split="test"`.
+One `InterventionResult` per `(record, layer, coefficient)`, `patch_site = "stored"`, `train_test_split="test"`.
 
 ### Test 5 — baseline
 
@@ -295,11 +328,9 @@ train_fraction: 0.5          # tests 3/4 only: direction-fitting split vs effect
 layer_sweep: all              # or an explicit list of layer indices, for cost control
 accuracy_floor: 0.90
 causal_clear_margin: 2.0
-capability_canary_path: configs/canary_qa.jsonl
+mean_intervention_coefficients: [0.5, 1.0, 2.0, 4.0]   # test 4's magnitude sweep, see §7
 dtype: bfloat16
 ```
-
-`configs/canary_qa.jsonl` is a small (~20-item), fixed, hand-picked general-knowledge QA set — not from the Phase 0 QA bank — used only to compute `capability_retention`: does a patched model still answer unrelated questions correctly, as a canary against the patch degrading the model wholesale rather than surgically shifting the targeted representation.
 
 ---
 
@@ -354,7 +385,7 @@ Not a requirement of this phase, recorded because it shapes what "the design sho
 
 **1. Placeholder scan:** no "TBD"/"TODO". The two places version numbers are deliberately left open (`transformers`/`nnsight`/`nnterp` exact pins) are explicitly justified, not left vague by omission.
 
-**2. Internal consistency:** the `InterventionResult` schema (§6) is used identically by tests 2 and 4 (§7); the kill-criteria table (§8) matches the plan's own §7 table row-for-row; the module layout (§3) lists exactly the files described in §4–§8, no orphans.
+**2. Internal consistency:** the `InterventionResult` schema (§6) is populated the same way by tests 2 and 4 (§7) — same field meanings, `effect_off_target` legitimately `None` only for `patch_site="retrieved"` in test 2, always populated for test 4's `"stored"`-only design; the kill-criteria table (§8) matches the plan's own §7 table row-for-row; the module layout (§3) lists exactly the files described in §4–§8, no orphans (the removed `configs/canary_qa.jsonl` was cleaned out of both the layout and the config section together, not left dangling in one place).
 
 **3. Scope check:** focused on one phase, one gate. T3b, Phase 1b, Phase 2+ are explicitly named as separate cycles in §1, not silently folded in.
 
@@ -364,3 +395,4 @@ Not a requirement of this phase, recorded because it shapes what "the design sho
 - CLI entry point: brainstorming's draft used a bare `python -m personabind.binding.battery` module-execution style; resolved in §3/§10 to a `personabind binding run`/`binding report` subcommand extension of the existing CLI, matching the established `build`/`report` pattern rather than introducing a second invocation style.
 - **(revision)** §7's first draft described the five tests at a conceptual level and forced all of tests 2–4 into one `InterventionResult` schema, without specifying the actual patch/prompt/statistical mechanics — flagged by the user as underspecified. Rewritten with: a shared "last-token-of-span" convention (§5) resolving the base/twin span-length mismatch; an explicit prompt-construction mechanism for off-target measurement (`positions.render_query_for`, §5); exact per-test algorithms with formulas (§7); a train/test split for the two tests that fit a direction from data (tests 3–4), to avoid measuring an effect on the same examples used to define it; a three-way result schema instead of one, since test 3 (cross-position classification) is not a causal patch and doesn't have an "effect_on_target" in the same sense as tests 2/4 (§6); and a robustness rule for "clears baseline" requiring an adjacent layer to also clear at half margin, not a single isolated layer (§8).
 - **(revision)** The "Phase 0's C1 control" reference read like a citation of a prior experiment. Clarified in §7 (test 3) as a fact about how the generator *constructs* the data (`build_stated`'s cell loop), directly checkable via `personabind report`, not a result from having run anything.
+- **(revision 2, correctness bug — caught by the user, not by me)** The entity patch site was defined as a context-side mention of the agent's name. For same-sentence T1/T2, that mention sits *before* the trait word — and in a causal transformer, a position before the point where base and twin diverge is provably identical between the two, at every layer. Patching it is a guaranteed no-op, not a weak effect; my original text ("patching...would not yield much") understated this. Fixed by splitting into two positions with different, honestly-scoped capabilities: `stored_position` (the trait phrase itself, always the true divergence point, exists before any question so it supports off-target measurement) and `query_agent_position`/`"retrieved"` (valid but on-target-only, since asking about a different agent from a state patched at *this* agent's question-mention isn't coherent — §5, §6, §7). Fixing this surfaced two more real gaps, fixed in the same pass: `capability_retention` was interp-discipline's field for *persistent* interventions and doesn't mean anything for Phase 1's transient, single-forward-pass patches — dropped, with the scope limit stated rather than left as dead weight in the schema (§6); and test 4's `coefficient: 1.0` was an unjustified guess directly contradicted by the plan's own §5.1 warning against assuming a steering magnitude is sane across layers/models — replaced with a magnitude sweep plus a reported norm-fraction check (§7, §9).
