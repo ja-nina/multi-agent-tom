@@ -126,52 +126,141 @@ def answer_position(tokenized: TokenizedPrompt) -> int
 
 def query_agent_position(tokenized: TokenizedPrompt, record: Record) -> int
     # the query_agent's name span specifically inside `question`
+
+def render_query_for(record: Record, other_agent: str) -> tuple[str, str]
+    # (question, answer_prefix) re-rendered as if `other_agent` were query_agent,
+    # by calling Phase 0's own schema.render_stated/render_transcript with the
+    # same context/agents and a different query_idx. Needed for off-target
+    # measurement (§7): "does patching agent A's binding also move what the
+    # model reports about agent B" requires literally asking about B.
 ```
+
+**One convention used everywhere below, stated once instead of per-test:** whenever a test reads or patches "the entity's position" or "the attribute's position," and the resolved span covers more than one token (a multi-subword name, a multi-word trait phrase), the position used is **the last token of that span** — the point by which attention has had the chance to aggregate the whole phrase. This also sidesteps a real problem: `agent_spans`/`trait_spans` return spans of different *lengths* between a base record and its twin whenever the swapped phrases tokenize to different token counts (e.g. T2's `"first-year student"` vs `"board-certified expert"`) — patching only ever targets one aligned token per side, never a variable-length span-to-span copy.
 
 Every span-finder **raises** (naming the record id) if it finds zero matches — a silently-empty match is exactly the failure mode ("patched the wrong token position, got a plausible-looking wrong number") this whole design exists to prevent. `tests/test_positions.py` decodes a sample of resolved spans back to text and asserts they equal the expected substring, so a human can see what was actually read/patched, not just trust an offset.
 
 ---
 
-## 6. Results schema
+## 6. Results schema — three record types, not one
 
-Every intervention test (2, 3, 4) writes one `InterventionResult` per `(record, layer)` to `results/binding/<model>__<variant>__<test>.jsonl`, append-only:
+The five tests split into three genuinely different measurement shapes. Forcing them into one schema was this spec's first draft's mistake — fixed here.
 
+**`AccuracyResult`** (test 1 only — no patching, no layer):
+```python
+@dataclass(frozen=True)
+class AccuracyResult:
+    model: str
+    variant: str
+    record_id: str
+    predicted: str        # the decoded continuation
+    gold: str              # record.answer
+    correct: bool
+    seed: int
+```
+
+**`InterventionResult`** (tests 2 and 4 — a direct causal patch, always paired with its baseline in the same record):
 ```python
 @dataclass(frozen=True)
 class InterventionResult:
-    test: str                          # "factorizability" | "position_test" | "mean_intervention"
-    record_id: str
+    test: str                          # "factorizability" | "mean_intervention"
+    record_id: str                      # the base record's id (twin_id / direction source noted below)
     model: str
     variant: str
     layer: int
-    layer_type: str                    # "full_attention" (only value used in this phase)
-    token_positions: dict               # {"patched": int, "read": int}; decoded strings logged alongside
+    layer_type: str                     # "full_attention" (only value used in this phase)
+    patch_site: str                     # "entity" | "attribute" (attribute only for T1/T2)
+    token_positions: dict                # {"patched": int, "read_on_target": int, "read_off_target": int}
     effect_on_target: float
-    effect_norm_matched_random: float   # REQUIRED, no default -- cannot construct a result without it
-    effect_off_target: float            # effect on the OTHER agent in the same record
-    capability_retention: float         # accuracy on the fixed canary set, patched model vs clean
+    effect_norm_matched_random: float    # REQUIRED, no default — cannot construct a result without it
+    effect_off_target: float
+    capability_retention: float
     coefficient: float
+    train_test_split: str                # "n/a" for test 2; "train" | "test" for test 4 (see §7)
     seed: int
     config_hash: str
 ```
 
-Test 1 (accuracy) is not an intervention and gets its own simpler record: `{model, variant, record_id, predicted, gold, correct, seed}`.
+**`PositionGeneralizationResult`** (test 3 — a cross-position classification check, not a patch; its own baseline is a shuffled-label control, not a random direction):
+```python
+@dataclass(frozen=True)
+class PositionGeneralizationResult:
+    test: str = "position_test"
+    model: str
+    variant: str
+    layer: int
+    trait_contrast: str                  # e.g. "expert_vs_novice", "tier0_vs_tier3"
+    fit_position: int                    # 0 or 1 — which position's examples the direction was fit on
+    same_position_accuracy: float        # accuracy on held-out examples at fit_position
+    cross_position_accuracy: float       # accuracy on held-out examples at the OTHER position
+    position_invariance_ratio: float     # cross_position_accuracy / same_position_accuracy
+    shuffled_label_control_accuracy: float  # REQUIRED — same procedure, labels shuffled before fitting
+    n_train: int
+    n_test: int
+    seed: int
+    config_hash: str
+```
 
-`effect_norm_matched_random` having no default is the structural enforcement of interp-discipline's rule: a result cannot be reported without its baseline, because the object that carries it cannot be built without it.
+`effect_norm_matched_random` and `shuffled_label_control_accuracy` having no default is the structural enforcement of interp-discipline's rule: a result cannot be reported without its baseline, because the object that carries it cannot be built without it.
 
 ---
 
 ## 7. The five tests
 
-**Test 1 — behavioral accuracy** (`accuracy.py`). Clean forward pass, no patching. Greedy-decode `len(gold_tokens)` tokens from the answer position; compare the decoded string to `record.answer` (a full-string compare, not just the first token, so "first-year student" isn't wrongly conflated with any other "first-..." continuation). Aggregated per `(model, variant)`.
+### Shared setup
 
-**Test 2 — factorizability** (`factorizability.py`). Uses the counterfactual pair directly (already built into Phase 0's data): run the twin, save its residual at the entity (agent-name) position at layer L; run the base clean, then re-run with that saved activation patched into the same position. Does the base's answer shift toward the twin's? Repeat, patching the trait-phrase position instead (T1/T2 only). `effect_off_target` = does the same patch change the *other* agent's reported trait (it shouldn't, if binding is per-entity).
+For a given `(model, variant)`, sample `sample_size` base records (config, default 1000) from the Phase 0 JSONL by fixed seed, without replacement — **each sampled base record's counterfactual twin is included automatically** (they're already adjacent pairs in the data), so this reads `2 * sample_size` records total. Tests 3 and 4 additionally split this sample into a `train` half and a `test` half (`train_fraction` in config, default 0.5, split by record-pair so a base and its twin never land on opposite sides) — the direction-fitting step and the effect-measurement step must use disjoint data, or the measured effect is inflated by fitting-and-testing on the same examples.
 
-**Test 3 — position test** (`position_test.py`). Phase 0's C1 control already guarantees every entity/trait pairing appears at both position 0 and position 1. Read the entity's activation at its actual name-token position across both; fit a difference-in-means direction on one position's examples, test whether it generalizes to the same entity/trait at the other position. Generalizing = binding follows the entity. Failing to generalize (a direction that only works at "position 0" regardless of which entity/trait occupies it) = binding is tracking the syntactic slot — spec §14's highest-probability risk, made directly measurable.
+### Test 1 — behavioral accuracy (`accuracy.py`)
 
-**Test 4 — mean intervention** (`mean_intervention.py`). Difference-in-means direction per trait value, per layer (diff-means, not logistic regression — more causally implicated per interp-discipline). Add/subtract at the entity's position in a fresh forward pass; does the reported trait shift toward the target value? Same `InterventionResult` schema as test 2.
+No layer, no patching. For every one of the `2 * sample_size` sampled records (base **and** twin — both are equally valid trials):
+1. Tokenize (`positions.tokenize_record`), forward pass, no patch.
+2. Greedy-decode `len(tokenizer(record.answer).input_ids)` tokens starting from `answer_position`, one token at a time, feeding each chosen token back in.
+3. `correct = decoded.strip().lower() == record.answer.strip().lower()` — a full-string compare (not first-token-only), so `"first-year student"` isn't credited for merely starting with `"first"`.
 
-**Test 5 — baseline.** Not its own file. `common/controls.py`'s `random_direction_matched_norm(reference, seed)` is called by tests 2 and 4 to fill `effect_norm_matched_random` in the same record as the real effect.
+`accuracy = mean(correct)` per `(model, variant)`, with a Clopper-Pearson 95% CI (binomial). `predicted`/`gold` are kept in every `AccuracyResult` so a human can spot-check real failures, not just see a number.
+
+### Test 2 — factorizability (`factorizability.py`)
+
+Uses the counterfactual pair directly. Base and twin share identical `context` up to the point their trait assignment diverges, identical `names`/`positions`/`question`, and — critically — **the same `query_agent`** (Task 7's builder keeps `qpos` fixed between a base and its twin), so "How reliable is Doug?" is asked of both; only the gold answer differs (base: Doug's trait; twin: Doug's *other* trait).
+
+For each layer `L` and each `patch_site` (`"entity"`: the query_agent's last name-token position nearest the binding statement; `"attribute"`: the trait-phrase's last token, T1/T2 only):
+1. Run the **twin** clean; save its residual at `(L, patch_site position)`.
+2. Run the **base** clean; record `logprob_base = log P(twin's_gold_first_token | clean base, at answer_position)`.
+3. Run the **base** again, patching the twin's saved activation into `(L, patch_site position)`; record `logprob_patched = log P(twin's_gold_first_token | patched base, at answer_position)`.
+4. `effect_on_target = logprob_patched - logprob_base` — how much closer the patched run gets to the counterfactual answer. (First-token log-probability, not a full greedy re-decode — re-decoding at every layer × position × record would be prohibitively expensive; test 1 already established full-string accuracy separately.)
+5. **Off-target:** repeat steps 2–4 but with the question re-rendered for the *other* agent (`positions.render_query_for`), reading `logprob` for that other agent's *own* gold-vs-twin first token instead. `effect_off_target` uses the same formula — did patching Doug's binding also move what the model reports about Charles?
+6. **Baseline:** repeat step 3 with the twin's saved activation replaced by `random_direction_matched_norm(saved_activation, seed)` (a random vector with the same norm) — gives `effect_norm_matched_random`.
+7. **Capability retention:** run the same patched forward pass (from step 3) on the fixed canary prompts (config's `capability_canary_path`) instead of the record's own question; `capability_retention` = accuracy on those, patched vs an unpatched run.
+
+One `InterventionResult` per `(record-pair, layer, patch_site)`.
+
+### Test 3 — position test (`position_test.py`)
+
+Not a patch — a cross-position generalization check on a fitted direction, per Phase 0's C1 property (every entity/trait pairing is emitted once with the queried agent at position 0 and once at position 1 — a fact about how the data was *built*, verifiable directly with `personabind report`, not a prior experimental result).
+
+For a chosen `trait_contrast` (T1: `expert` vs `novice`; T2: the top tier vs the bottom tier) and layer `L`:
+1. From the **train** split, take every record where the queried agent is at position 0; read its activation at `(L, query_agent's last-name-token position)`; compute `d0 = mean(activation | trait=high) - mean(activation | trait=low)` — restricted to position-0 examples only.
+2. From the **test** split, classify position-0 examples by projecting onto `d0` and thresholding at the midpoint of the two training means → `same_position_accuracy`.
+3. From the **test** split, classify position-1 examples the same way, using the *same* `d0` (fit only on position 0) → `cross_position_accuracy`.
+4. `position_invariance_ratio = cross_position_accuracy / same_position_accuracy`. Near 1 → the direction generalizes across position (binding follows the entity). Near the chance level → the direction only works at the position it was fit on (binding is tracking the syntactic slot — spec §14's named highest-probability risk, made directly measurable rather than asserted).
+5. **Baseline (shuffled-label control):** repeat steps 1–3 with the training labels shuffled (same seed logged) before computing `d0` → `shuffled_label_control_accuracy`. This should sit at chance; if it doesn't, the probe has capacity to fit noise and the accuracy numbers above are not to be trusted at face value (interp-discipline's control-task rule, applied here rather than only in Phase 3).
+
+One `PositionGeneralizationResult` per `(trait_contrast, layer)`; repeat with `fit_position` flipped (fit on position 1, test cross onto position 0) as a symmetric second row.
+
+### Test 4 — mean intervention (`mean_intervention.py`)
+
+Also uses a fitted direction, but as a **causal patch** this time, so it reuses `InterventionResult`, not `PositionGeneralizationResult`.
+
+1. From the **train** split, fit `direction = mean(activation | trait=high) - mean(activation | trait=low)` at layer `L`, same read position as test 3 (query_agent's last-name-token), pooling both positions together (unlike test 3, which deliberately keeps them separate).
+2. For each **test**-split record: at `(L, query_agent's position)`, patch `h' = h + coefficient * direction`, signed toward whichever trait value is the *opposite* of that record's actual queried trait (mirroring test 2's "push toward the counterfactual" framing) — `coefficient` defaults to `1.0` (add the estimated mean-difference vector once; a magnitude sweep is Phase 4's steering work, out of scope here).
+3. `effect_on_target = logprob_patched - logprob_clean`, on the first token of the *opposite* trait's surface form — same formula shape as test 2.
+4. Off-target, baseline (`random_direction_matched_norm(direction, seed)`), and capability retention computed exactly as in test 2, steps 5–7.
+
+One `InterventionResult` per `(record, layer)`, `patch_site` fixed to `"entity"` (there is no fitted "attribute direction" in this test), `train_test_split="test"`.
+
+### Test 5 — baseline
+
+Not its own file or its own record type. `common/controls.py` provides `random_direction_matched_norm(reference, seed)`, called inline by tests 2 and 4, and `shuffle_labels(labels, seed)` called inline by test 3 — both baselines land in the *same* result record as the effect they control for, never a separate run.
 
 ---
 
@@ -179,7 +268,7 @@ Test 1 (accuracy) is not an intervention and gets its own simpler record: `{mode
 
 A variant **passes** iff both:
 1. Test 1 accuracy clears `accuracy_floor` (default 0.90, applied uniformly across T1/T2/T3a — the plan states this floor explicitly only for T1; applying it to all three rather than leaving T2/T3a unguarded is this spec's choice, flagged for the user to override per-variant if wanted).
-2. At least one causal test (factorizability or mean-intervention) shows `effect_on_target` clearing `effect_norm_matched_random` by `causal_clear_margin` (default 2 standard errors) at some layer, for that variant.
+2. At least one causal test (factorizability or mean-intervention) **clears baseline**, defined precisely as: for some layer `L`, the paired difference `effect_on_target − effect_norm_matched_random` (paired per record, per §7) has a mean that exceeds `causal_clear_margin` (default 2.0) standard errors above zero, **and** the same holds at `L-1` or `L+1` with at least half that margin. The adjacent-layer requirement exists because sweeping every layer and accepting "any single layer clears it" inflates false positives from noise — a lucky spike at one isolated layer does not count; a real effect should show up at its neighbors too.
 
 Accuracy alone cannot distinguish true binding from a shortcut heuristic — that is the entire reason tests 2–4 exist, so the gate needs both.
 
@@ -201,8 +290,9 @@ seed: 20260910
 models: [Qwen/Qwen3-4B, Qwen/Qwen3-8B]
 variants: [t1_discrete, t2_graded, t3a_inferred_templated]   # order = the gate order
 dataset_dir: data/
-sample_size: 1000            # spec's own "results ... over >= 1000 examples" acceptance criterion
-layer_sweep: all
+sample_size: 1000            # base records sampled per (model, variant); each brings its twin (see §7)
+train_fraction: 0.5          # tests 3/4 only: direction-fitting split vs effect-measurement split
+layer_sweep: all              # or an explicit list of layer indices, for cost control
 accuracy_floor: 0.90
 causal_clear_margin: 2.0
 capability_canary_path: configs/canary_qa.jsonl
@@ -229,8 +319,10 @@ Loads `PERSONABIND_PYTHON` (`.venv/bin/python`, same default as `build_t3b.sbatc
 
 - **`tests/test_activations.py`** — a tiny randomly-initialized model of a small, fast-downloading architecture (e.g. 2-layer GPT-2-shape, seconds on CPU) exercises `load_model`/`read_residual`/`patch_residual` and `verify_tooling` mechanics without touching real Qwen weights or needing a GPU.
 - **`tests/test_positions.py`** — a real small tokenizer, synthetic strings shaped exactly like Phase 0 records, checks span-finding decodes back to the expected substring and raises on a deliberately-absent name.
-- **`tests/test_battery_gate.py`** — mocks the accuracy/effect functions to return controlled values; asserts the kill-criteria logic stops at the correct row for each of the four table outcomes in §8. Pure logic, no model — this is the safety mechanism, so it gets the most direct coverage.
-- **`tests/test_controls.py`** — `random_direction_matched_norm` produces a vector of the requested norm, is deterministic given a seed, and is NOT equal to the reference direction.
+- **`tests/test_battery_gate.py`** — mocks the accuracy/effect functions to return controlled values; asserts the kill-criteria logic stops at the correct row for each of the four table outcomes in §8, including the adjacent-layer robustness rule (a single-layer noise spike must NOT pass the gate).
+- **`tests/test_controls.py`** — `random_direction_matched_norm` produces a vector of the requested norm, is deterministic given a seed, and is NOT equal to the reference direction; `shuffle_labels` is deterministic given a seed and actually permutes (not identity) for `n >= 2` labels.
+- **`tests/test_position_test.py`** — on the tiny model, a synthetic activation set with a *planted* position-invariant direction shows `position_invariance_ratio` near 1 and `shuffled_label_control_accuracy` near chance; a planted position-*locked* direction (deliberately different means per position) shows the ratio collapsing.
+- **`tests/test_mean_intervention.py`** and **`tests/test_factorizability.py`** — on the tiny model, assert the train/test split never puts a base and its twin on opposite sides, and that `effect_on_target`/`effect_norm_matched_random`/`effect_off_target` are computed from the formulas in §7 (not just that they're present).
 - **`@pytest.mark.integration`** (deselected by default, same convention as Phase 0's real-dataset test) — one real record through real Qwen3-4B, run manually once on the cluster to confirm the day-0 tooling check and the end-to-end path actually work outside CI.
 
 ---
@@ -270,3 +362,5 @@ Not a requirement of this phase, recorded because it shapes what "the design sho
 - The plan's kill-criteria table doesn't specify whether "T2 fails"/"T3 fails" means accuracy-only or the full causal battery — resolved explicitly in §8 as "both accuracy floor AND causal-clears-baseline," with the reasoning stated (accuracy alone can't distinguish true binding from a shortcut).
 - The plan states the 90% accuracy floor for T1 only — resolved as "applied uniformly across T1/T2/T3a," flagged as this spec's choice rather than presented as unambiguous plan text.
 - CLI entry point: brainstorming's draft used a bare `python -m personabind.binding.battery` module-execution style; resolved in §3/§10 to a `personabind binding run`/`binding report` subcommand extension of the existing CLI, matching the established `build`/`report` pattern rather than introducing a second invocation style.
+- **(revision)** §7's first draft described the five tests at a conceptual level and forced all of tests 2–4 into one `InterventionResult` schema, without specifying the actual patch/prompt/statistical mechanics — flagged by the user as underspecified. Rewritten with: a shared "last-token-of-span" convention (§5) resolving the base/twin span-length mismatch; an explicit prompt-construction mechanism for off-target measurement (`positions.render_query_for`, §5); exact per-test algorithms with formulas (§7); a train/test split for the two tests that fit a direction from data (tests 3–4), to avoid measuring an effect on the same examples used to define it; a three-way result schema instead of one, since test 3 (cross-position classification) is not a causal patch and doesn't have an "effect_on_target" in the same sense as tests 2/4 (§6); and a robustness rule for "clears baseline" requiring an adjacent layer to also clear at half margin, not a single isolated layer (§8).
+- **(revision)** The "Phase 0's C1 control" reference read like a citation of a prior experiment. Clarified in §7 (test 3) as a fact about how the generator *constructs* the data (`build_stated`'s cell loop), directly checkable via `personabind report`, not a result from having run anything.
