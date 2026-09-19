@@ -2,7 +2,6 @@ import torch
 
 from personabind.binding import mean_intervention
 from personabind.binding.mean_intervention import run_mean_intervention
-from personabind.binding.positions import trait_of
 from personabind.common.activations import load_model
 from personabind.record import AgentSpec, Record
 
@@ -73,42 +72,39 @@ def test_layer_type_is_read_from_handle_not_hardcoded():
     assert layer1.layer_type == "linear_attention"
 
 
-def test_off_target_uses_other_agents_trait_not_query_agents_own_answer(monkeypatch):
-    # Regression guard for the off-target/layer_type pattern that Task 7's
-    # review flagged on factorizability.py: the off-target token lookup must
-    # target trait_of(record, other_agent) -- the OTHER agent's own trait --
-    # never the record's own query-agent answer field.
+def test_off_target_lookup_uses_trait_of_for_the_other_agent_not_the_query_agent(monkeypatch):
+    # Regression guard for the off-target pattern Task 7's review flagged on
+    # factorizability.py. A prior version of this test spied on token-string
+    # values and was found NOT to discriminate the bug it claimed to guard
+    # against: for this fixture's binary expert/novice trait pair, the
+    # on-target and off-target lookup strings collapse to the same values
+    # regardless of whether the off-target code is correct or buggy (see
+    # Task 9's review). Spying on trait_of's CALL ARGUMENTS instead checks
+    # the call graph directly and cannot be fooled by that collapse: trait_of
+    # is only ever supposed to be invoked here to look up the OTHER agent's
+    # trait for off-target purposes, never the record's own query_agent.
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     records = [_record(i, i % 2) for i in range(10)]
+    records_by_id = {r.id: r for r in records}
 
-    # Precondition: the fixture actually discriminates the two lookups for
-    # every record -- each record's own answer differs from the other
-    # agent's trait, so a regression using record.answer instead of
-    # trait_of(record, other_agent) would look up the wrong token.
-    for r in records:
-        other_agent = next(a.name for a in r.agents if a.name != r.query_agent)
-        assert r.answer != trait_of(r, other_agent)
+    calls = []
+    real_trait_of = mean_intervention.trait_of
 
-    tokens_looked_up = []
-    real_first_token_id = mean_intervention._first_token_id
+    def spy(record, agent_name):
+        calls.append((record.id, agent_name))
+        return real_trait_of(record, agent_name)
 
-    def spy(handle_arg, text):
-        tokens_looked_up.append(text)
-        return real_first_token_id(handle_arg, text)
+    monkeypatch.setattr(mean_intervention, "trait_of", spy)
 
-    monkeypatch.setattr(mean_intervention, "_first_token_id", spy)
-
-    results = run_mean_intervention(
+    run_mean_intervention(
         handle, records, trait_contrast=("expert", "novice"), layers=[0],
         coefficients=[1.0], train_fraction=0.5, seed=1, config_hash="abc",
     )
 
-    for r in results:
-        record = next(rec for rec in records if rec.id == r.record_id)
-        other_agent = next(a.name for a in record.agents if a.name != record.query_agent)
-        expected_off_target_trait = trait_of(record, other_agent)
-        # the correct off-target trait must have been looked up. Our
-        # precondition above guarantees expected_off_target_trait !=
-        # record.answer for every record, so a regression that only ever
-        # looked up record.answer (never the correct one) is caught here.
-        assert expected_off_target_trait in tokens_looked_up
+    assert calls, "trait_of was never called -- off-target lookup path not exercised"
+    for record_id, agent_name in calls:
+        query_agent = records_by_id[record_id].query_agent
+        assert agent_name != query_agent, (
+            f"trait_of called with the record's OWN query_agent ({agent_name!r}) for "
+            f"off-target lookup on record {record_id!r} -- must be the OTHER agent"
+        )
