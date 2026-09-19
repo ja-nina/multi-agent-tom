@@ -84,3 +84,18 @@ article included. Treat a rising AUC as a signal to go read the generated text.
     uv run personabind build --variant t3b --config configs/generator.yaml
 
 T3b writes `data/t3b_generation_report.json` with per-model reject rates.
+
+## Phase 1: binding battery
+
+Requires Phase 0 datasets built first (`personabind build --variant t1|t2|t3a`).
+
+    uv run personabind binding run --model Qwen/Qwen3-4B --config configs/binding.yaml
+
+On the cluster: `sbatch slurm/run_binding_battery.sbatch qwen3-4b` (see its header
+comment; loads the model directly in-process, no vLLM server needed here).
+
+Writes `results/binding/<model>_verdict.json` naming which spec kill-criteria
+row was hit, plus per-test JSONL under the same directory. Start with
+Qwen3-4B; only run Qwen3-8B if 4B's own T1 accuracy clears the floor (a
+failure there means "rig broken or model too small," not "run the bigger
+model to fix it" -- re-run at 8B only to rule out the latter).
