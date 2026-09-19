@@ -135,15 +135,29 @@ def stored_position(tokenized: TokenizedPrompt, record: Record, agent: str) -> i
     return _last_turn_speaker_position(tokenized, record, agent)
 
 
+def measurement_answer_prefix(agent_name: str) -> str:
+    """Article-free answer prefix for logprob MEASUREMENT only -- never used to
+    resolve a patch/read position, which happens earlier in the tokenized text
+    and is unaffected by this choice. Phase 0's stored `answer_prefix` bakes in
+    a grammatical article that agrees with the record's OWN trait (T1's
+    "is a"/"is an", via generator.traits.article_for) -- since that article
+    sits AFTER every patch site, no patch can change it, and the model assigns
+    near-zero probability to whichever trait needs the OTHER article,
+    regardless of any real binding effect. This is a no-op for T2 (all four
+    tier phrases are consonant-initial, so the article was already constant)
+    and for T3a (whose template never had an article to begin with)."""
+    return f"{agent_name} is"
+
+
 def render_query_for(record: Record, other_agent: str) -> tuple[str, str]:
     if record.variant in ("t1_discrete", "t2_graded"):
         names = [a.name for a in record.agents]
         traits = [a.trait for a in record.agents]
         other_idx = names.index(other_agent)
-        _, question, answer_prefix = render_stated(names, traits, query_idx=other_idx, fmt=record.format)
-        return question, answer_prefix
+        _, question, _ = render_stated(names, traits, query_idx=other_idx, fmt=record.format)
+        return question, measurement_answer_prefix(other_agent)
     other = next(a for a in record.agents if a.name == other_agent)
-    return f"How reliable is {other.name}?", f"{other.name} is"
+    return f"How reliable is {other.name}?", measurement_answer_prefix(other.name)
 
 
 def trait_of(record: Record, agent_name: str) -> str:

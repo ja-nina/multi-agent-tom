@@ -6,6 +6,7 @@ import torch
 
 from personabind.binding import position_test as pt
 from personabind.binding.position_test import (
+    _accuracy,
     _classify,
     _fit_diff_means,
     _split_train_test,
@@ -69,7 +70,9 @@ def test_run_position_test_reports_shuffled_control():
     assert len(results) == 2  # fit_position=0 and fit_position=1, one layer
     for r in results:
         assert r.shuffled_label_control_accuracy is not None
-        assert 0.0 <= r.position_invariance_ratio or r.position_invariance_ratio >= 0.0
+        # Non-negative OR genuinely NaN -- NaN is the documented signal that
+        # same_position_accuracy was 0 (see the dedicated test below).
+        assert r.position_invariance_ratio >= 0.0 or math.isnan(r.position_invariance_ratio)
 
 
 def _paired_records(n_pairs: int) -> list[Record]:
@@ -125,7 +128,10 @@ def test_run_position_test_raises_clear_error_on_single_label_train_fold():
     r3 = dataclasses.replace(r3, counterfactual_id=r2.id)
     records = [r0, r1, r2, r3]
 
-    with pytest.raises(ValueError, match=r"fit_position=0, layer=0"):
+    # The guard now fires ONCE per fit_position, BEFORE any layer is processed:
+    # whether a split is degenerate depends only on which records landed in it,
+    # never on the layer, so the message is deliberately layer-independent.
+    with pytest.raises(ValueError, match=r"fit_position=0 contains only one trait level"):
         run_position_test(
             handle, records, trait_contrast=("expert", "novice"), layers=[0],
             train_fraction=0.5, seed=1, config_hash="abc",
@@ -159,8 +165,9 @@ def test_position_invariance_ratio_is_nan_not_zero_when_same_position_accuracy_i
 
     records = pos0_records + pos1_records
 
-    # Replicate run_position_test's own split (layer=0 -> seed offset 0) to learn,
-    # deterministically, which physical records land in the pos0 train/test folds.
+    # Replicate run_position_test's own split (fit_position=0 -> seed offset 0;
+    # the split is per fit_position, not per layer) to learn, deterministically,
+    # which physical records land in the pos0 train/test folds.
     train0, test0 = _split_train_test(pos0_records, train_fraction=0.5, seed=seed)
 
     activations: dict[str, torch.Tensor] = {}
@@ -189,3 +196,83 @@ def test_position_invariance_ratio_is_nan_not_zero_when_same_position_accuracy_i
     assert result0.same_position_accuracy == 0.0
     assert math.isnan(result0.position_invariance_ratio)
     assert result0.position_invariance_ratio != 0.0
+
+
+def test_accuracy_excludes_records_outside_the_trait_contrast():
+    # T2 has FOUR tiers but only the two extremes form the contrast. Scoring a
+    # mid-tier record as `actual = 0` (the old `answer == high_trait` test)
+    # fabricates a low-extreme label for a record that is neither extreme.
+    # Such records must leave both the numerator and the denominator.
+    high, low, mid = "board-certified expert", "first-year student", "senior practitioner"
+
+    def rec(answer, tag):
+        base = _record(position=0, level=1, name_a=f"A{tag}", name_b=f"B{tag}")
+        return dataclasses.replace(base, id=f"r_{tag}", answer=answer)
+
+    direction = torch.tensor([1.0])
+    midpoint = 0.0
+    records = [rec(high, "hr"), rec(high, "hw"), rec(low, "lr"), rec(mid, "m")]
+    activations = [
+        torch.tensor([1.0]),    # high, classified 1 -> correct
+        torch.tensor([-1.0]),   # high, classified 0 -> wrong
+        torch.tensor([-1.0]),   # low, classified 0 -> correct
+        torch.tensor([-1.0]),   # mid, classified 0 -> old code scored this "correct"
+    ]
+
+    acc, n_scored = _accuracy(records, activations, direction, midpoint, high, low)
+
+    assert n_scored == 3, "the mid-tier record must not enter the denominator"
+    assert acc == pytest.approx(2 / 3)
+    # the pre-fix behaviour would have been 3/4 -- assert we are not that
+    assert acc != pytest.approx(3 / 4)
+
+
+def test_accuracy_returns_zero_and_no_count_when_nothing_is_scoreable():
+    direction = torch.tensor([1.0])
+    mid_only = [dataclasses.replace(
+        _record(position=0, level=1), answer="senior practitioner"
+    )]
+    acc, n_scored = _accuracy(
+        mid_only, [torch.tensor([1.0])], direction, 0.0,
+        "board-certified expert", "first-year student",
+    )
+    assert (acc, n_scored) == (0.0, 0)
+
+
+def test_train_test_split_is_computed_once_per_fit_position_not_per_layer(monkeypatch):
+    # battery.clears_baseline corroborates a layer against its NEIGHBOUR; that
+    # comparison is only meaningful if both layers were fit and evaluated on the
+    # SAME records. A per-layer resplit silently compares different data.
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    records: list[Record] = []
+    for i, p in enumerate([0, 1] * 10):
+        high = _record(position=p, level=1, name_a=f"A{i}", name_b=f"B{i}")
+        low = _record(position=p, level=0, name_a=f"A{i}", name_b=f"B{i}")
+        high = dataclasses.replace(high, counterfactual_id=low.id)
+        low = dataclasses.replace(low, counterfactual_id=high.id)
+        records += [high, low]
+
+    calls = []
+    real_split = pt._split_train_test
+
+    def spy(items, train_fraction, seed):
+        train, test = real_split(items, train_fraction, seed)
+        calls.append(({r.id for r in train}, {r.id for r in test}))
+        return train, test
+
+    monkeypatch.setattr(pt, "_split_train_test", spy)
+
+    results = run_position_test(
+        handle, records, trait_contrast=("expert", "novice"), layers=[0, 1],
+        train_fraction=0.5, seed=1, config_hash="abc",
+    )
+
+    assert len(results) == 4  # 2 fit_positions x 2 layers
+    assert len(calls) == 2, (
+        f"expected one split per fit_position, got {len(calls)} -- the split is being "
+        "recomputed per layer, so neighbouring layers see different records"
+    )
+    # and both layers of a fit_position genuinely report the same fold sizes
+    for fit_position in (0, 1):
+        per_layer = [r for r in results if r.fit_position == fit_position]
+        assert len({(r.n_train, r.n_test) for r in per_layer}) == 1

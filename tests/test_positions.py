@@ -4,6 +4,7 @@ from transformers import AutoTokenizer
 from personabind.binding.positions import (
     agent_spans,
     answer_position,
+    measurement_answer_prefix,
     query_agent_position,
     render_query_for,
     stored_position,
@@ -163,6 +164,41 @@ def test_render_query_for_swaps_the_queried_agent_t1():
     question, answer_prefix = render_query_for(record, "Charles")
     assert "Charles" in question
     assert answer_prefix.startswith("Charles is")
+
+
+def test_measurement_answer_prefix_is_bare_and_article_free():
+    assert measurement_answer_prefix("Doug") == "Doug is"
+    assert measurement_answer_prefix("Charles") == "Charles is"
+
+
+def test_render_query_for_returns_an_article_free_answer_prefix_for_both_articles():
+    # T1's stored answer_prefix carries a grammatical article agreeing with the
+    # record's OWN trait ("Doug is an" / "Charles is a"). That article sits after
+    # every patch site, so no patch can change it -- measuring the counterfactual
+    # trait's logprob against the wrong article floor-compresses the effect.
+    # render_query_for must therefore hand back a BARE prefix for both the
+    # vowel-initial ("expert" -> "an") and consonant-initial ("novice" -> "a") case.
+    from personabind.generator.schema import render_stated
+
+    record = _t1_same_sentence()
+    names = [a.name for a in record.agents]
+    traits = [a.trait for a in record.agents]
+
+    for idx, name in enumerate(names):
+        # Precondition: the unfixed path really would have produced an article
+        # here, so this fixture genuinely discriminates the bug.
+        _, _, stored_prefix = render_stated(names, traits, query_idx=idx, fmt=record.format)
+        assert stored_prefix.endswith((" a", " an")), (
+            f"fixture does not exercise the article path for {name!r}: {stored_prefix!r}"
+        )
+
+        _, answer_prefix = render_query_for(record, name)
+        assert answer_prefix == f"{name} is"
+        assert not answer_prefix.endswith(" a")
+        assert not answer_prefix.endswith(" an")
+
+    # and the two cases really were the two different articles
+    assert traits == ["expert", "novice"]  # vowel-initial, then consonant-initial
 
 
 def test_render_query_for_t3_only_changes_the_question():

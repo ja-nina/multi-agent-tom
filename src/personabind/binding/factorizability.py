@@ -13,6 +13,7 @@ import torch
 
 from personabind.binding.positions import (
     answer_position,
+    measurement_answer_prefix,
     query_agent_position,
     render_query_for,
     stored_position,
@@ -52,13 +53,24 @@ def run_factorizability(
 ) -> list[InterventionResult]:
     results: list[InterventionResult] = []
     for pair_idx, (base, twin) in enumerate(record_pairs):
-        base_tok = tokenize_record(base, handle._tokenizer)
+        base_tok = tokenize_record(base, handle._tokenizer)  # for POSITION resolution only, below
         twin_tok = tokenize_record(twin, handle._tokenizer)
-        base_ids = torch.tensor([base_tok.input_ids])
         twin_ids = torch.tensor([twin_tok.input_ids])
 
+        # Measurement uses a bare "{agent} is" answer_prefix instead of base's
+        # stored one -- see measurement_answer_prefix's docstring. base_pos,
+        # resolved below from base_tok's CONTEXT (unaffected by this prefix
+        # change, since context comes first in the text), stays a valid index
+        # into this new tokenization too -- same reasoning already used for
+        # other_base just below.
+        measure_base = base.__class__(
+            **{**base.__dict__, "answer_prefix": measurement_answer_prefix(base.query_agent)}
+        )
+        measure_base_tok = tokenize_record(measure_base, handle._tokenizer)
+        base_ids = torch.tensor([measure_base_tok.input_ids])
+
         other_agent = next(a.name for a in base.agents if a.name != base.query_agent)
-        other_q, other_ap = render_query_for(base, other_agent)
+        other_q, other_ap = render_query_for(base, other_agent)  # other_ap is now bare too
         other_base = base.__class__(**{**base.__dict__, "question": other_q, "answer_prefix": other_ap})
         other_base_tok = tokenize_record(other_base, handle._tokenizer)
         other_base_ids = torch.tensor([other_base_tok.input_ids])
@@ -107,7 +119,7 @@ def run_factorizability(
                     variant=base.variant, layer=layer,
                     layer_type=handle.layer_types[layer] if handle.layer_types else "full_attention",
                     patch_site=patch_site,
-                    token_positions={"patched": base_pos, "read_on_target": answer_position(base_tok), "read_off_target": read_off_target},
+                    token_positions={"patched": base_pos, "read_on_target": answer_position(measure_base_tok), "read_off_target": read_off_target},
                     effect_on_target=effect_on_target, effect_norm_matched_random=effect_baseline,
                     effect_off_target=effect_off_target, coefficient=1.0, direction_norm_fraction=None,
                     train_test_split="n/a", seed=seed_i, config_hash=config_hash,

@@ -128,6 +128,44 @@ def test_off_target_uses_other_agents_trait_not_stale_answer_field(monkeypatch):
     assert set(golds_looked_up) == {trait_of(twin, twin.query_agent), trait_of(twin, other_agent)}
 
 
+def test_measurement_prompts_drop_the_stored_grammatical_article(monkeypatch):
+    # Regression guard for the T1 article-measurement bias: the stored
+    # answer_prefix ends in "is an"/"is a" -- an article that agrees with the
+    # BASE record's own trait and sits AFTER every patch site, so no patch can
+    # change it. Measuring the counterfactual trait's first-token logprob
+    # against the wrong article floors the effect regardless of any real
+    # binding. Both measurement prompts (on-target and off-target) must
+    # therefore be built from a bare "{agent} is" prefix instead.
+    #
+    # tiny-gpt2's logprobs are meaningless here, so assert on the DECODED TEXT
+    # of the ids actually handed to forward_logits -- a revert that fed
+    # base.answer_prefix straight through would decode to "...Doug is an".
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    base, twin = _pair()
+
+    # Precondition: the fixture really carries an article to strip.
+    assert base.answer_prefix.endswith(" an")
+
+    seen_texts = []
+    real_forward_logits = factorizability.forward_logits
+
+    def spy(handle_arg, input_ids, *args, **kwargs):
+        seen_texts.append(handle._tokenizer.decode(input_ids[0].tolist()))
+        return real_forward_logits(handle_arg, input_ids, *args, **kwargs)
+
+    monkeypatch.setattr(factorizability, "forward_logits", spy)
+
+    run_factorizability(handle, [(base, twin)], layers=[0], seed=1, config_hash="abc")
+
+    assert len(seen_texts) == 2  # one clean pass on-target, one off-target
+    on_target_text, off_target_text = seen_texts
+    assert on_target_text.endswith("Doug is")
+    assert off_target_text.endswith("Charles is")
+    for text in seen_texts:
+        assert not text.endswith(" is an")
+        assert not text.endswith(" is a")
+
+
 def test_off_target_reuses_base_pos_without_reresolving_against_other_base(monkeypatch):
     # Regression guard for the second corrected bug: re-resolving the patch
     # position against other_base_tok instead of reusing base_pos directly.

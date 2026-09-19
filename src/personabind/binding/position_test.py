@@ -48,13 +48,24 @@ def _read_activation(handle: ModelHandle, record, layer: int) -> torch.Tensor:
     return read_residual(handle, input_ids, layer, pos)
 
 
-def _accuracy(records, activations, direction, midpoint, high_trait) -> float:
-    correct = 0
-    for record, activation in zip(records, activations):
-        predicted = _classify(activation, direction, midpoint)
-        actual = 1 if record.answer == high_trait else 0
-        correct += int(predicted == actual)
-    return correct / len(records) if records else 0.0
+def _accuracy(records, activations, direction, midpoint, high_trait, low_trait) -> tuple[float, int]:
+    """Accuracy over ONLY the records whose answer is one of the two contrast
+    traits, plus how many were actually scored. T2 has four tiers, so roughly
+    half its records carry a MIDDLE tier as their answer -- neither extreme.
+    Scoring those as `actual = 0` (the old `record.answer == high_trait` test)
+    fabricates a low-extreme label for a record that is neither, silently
+    computing every accuracy against ~half invented ground truth."""
+    scored = [
+        (record, activation) for record, activation in zip(records, activations)
+        if record.answer in (high_trait, low_trait)
+    ]
+    if not scored:
+        return 0.0, 0
+    correct = sum(
+        int(_classify(activation, direction, midpoint) == (1 if record.answer == high_trait else 0))
+        for record, activation in scored
+    )
+    return correct / len(scored), len(scored)
 
 
 def run_position_test(
@@ -67,34 +78,50 @@ def run_position_test(
     pos1 = [r for r in records if r.agents[[a.name for a in r.agents].index(r.query_agent)].position == 1]
 
     results: list[PositionGeneralizationResult] = []
-    for layer in layers:
-        for fit_position, fit_pool, other_pool in ((0, pos0, pos1), (1, pos1, pos0)):
-            train_recs, test_recs_same = _split_train_test(fit_pool, train_fraction, seed + layer)
-            test_recs_other = other_pool
+    for fit_position, fit_pool, other_pool in ((0, pos0, pos1), (1, pos1, pos0)):
+        # Split ONCE per fit_position (not per layer) so every layer's
+        # adjacent-layer comparison (battery.clears_baseline) is drawn from
+        # the SAME train/test records, as the spec's design intends -- not
+        # different data at each layer.
+        train_recs, test_recs_same = _split_train_test(fit_pool, train_fraction, seed + fit_position)
+        test_recs_other = other_pool
 
+        # Whether a split is degenerate depends only on which RECORDS landed in
+        # it, never on the layer -- so check once, up front, before any
+        # activation read, rather than rediscovering it inside every layer.
+        train_answers = [r.answer for r in train_recs]
+        if high_trait not in train_answers or low_trait not in train_answers:
+            raise ValueError(
+                f"run_position_test: training fold for fit_position={fit_position} "
+                f"contains only one trait level ({train_answers.count(high_trait)} high, "
+                f"{train_answers.count(low_trait)} low) -- cannot fit a difference-in-means "
+                "direction. Increase train_fraction or sample size."
+            )
+
+        for layer in layers:
             train_acts = [_read_activation(handle, r, layer) for r in train_recs]
             train_high = [a for r, a in zip(train_recs, train_acts) if r.answer == high_trait]
             train_low = [a for r, a in zip(train_recs, train_acts) if r.answer == low_trait]
-            if not train_high or not train_low:
-                raise ValueError(
-                    f"run_position_test: training fold for fit_position={fit_position}, layer={layer} "
-                    f"contains only one trait level ({len(train_high)} high, {len(train_low)} low) -- "
-                    "cannot fit a difference-in-means direction. Increase train_fraction or sample size."
-                )
             direction, midpoint = _fit_diff_means(train_high, train_low)
 
             same_acts = [_read_activation(handle, r, layer) for r in test_recs_same]
             other_acts = [_read_activation(handle, r, layer) for r in test_recs_other]
-            same_acc = _accuracy(test_recs_same, same_acts, direction, midpoint, high_trait)
-            cross_acc = _accuracy(test_recs_other, other_acts, direction, midpoint, high_trait)
+            same_acc, n_same_filtered = _accuracy(
+                test_recs_same, same_acts, direction, midpoint, high_trait, low_trait
+            )
+            cross_acc, _ = _accuracy(test_recs_other, other_acts, direction, midpoint, high_trait, low_trait)
 
-            shuffled_answers = shuffle_labels([r.answer for r in train_recs], seed + layer + 1)
+            shuffled_answers = shuffle_labels(
+                [r.answer for r in train_recs], seed + fit_position * 1000 + layer + 1
+            )
             shuf_high = [a for r_ans, a in zip(shuffled_answers, train_acts) if r_ans == high_trait]
             shuf_low = [a for r_ans, a in zip(shuffled_answers, train_acts) if r_ans == low_trait]
-            # shuffle_labels is a permutation of train_recs' labels, and train_high/train_low
-            # were just proven non-empty above, so shuf_high/shuf_low are guaranteed non-empty too.
+            # shuffle_labels is a permutation of train_recs' labels, and both trait levels
+            # were proven present above, so shuf_high/shuf_low are guaranteed non-empty too.
             shuf_direction, shuf_midpoint = _fit_diff_means(shuf_high, shuf_low)
-            shuffled_control_acc = _accuracy(test_recs_same, same_acts, shuf_direction, shuf_midpoint, high_trait)
+            shuffled_control_acc, _ = _accuracy(
+                test_recs_same, same_acts, shuf_direction, shuf_midpoint, high_trait, low_trait
+            )
 
             results.append(PositionGeneralizationResult(
                 model=handle.model_id, variant=records[0].variant if records else "", layer=layer,
@@ -106,6 +133,7 @@ def run_position_test(
                 # silently treating it as a real (and misleadingly identical) zero ratio.
                 position_invariance_ratio=(cross_acc / same_acc) if same_acc > 0 else float("nan"),
                 shuffled_label_control_accuracy=shuffled_control_acc,
-                n_train=len(train_recs), n_test=len(test_recs_same), seed=seed + layer, config_hash=config_hash,
+                n_train=len(train_recs), n_test=n_same_filtered,
+                seed=seed + fit_position * 1000 + layer, config_hash=config_hash,
             ))
     return results
