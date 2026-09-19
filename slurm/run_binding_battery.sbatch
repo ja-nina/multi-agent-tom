@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=personabind-binding
 #SBATCH --array=0-0%10
-#SBATCH -p gpu17
+#SBATCH -p gpu-a100
 #SBATCH -c 10
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=gpu22-a40-05,gpu22-a40-06,gpu17-l40-07,gpu17-l40-20

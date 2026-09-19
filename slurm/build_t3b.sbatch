@@ -35,8 +35,8 @@
 #   sbatch slurm/build_t3b.sbatch qwen3.5-9b
 #   # when it finishes:  mv data/t3b_inferred_llm.jsonl data/t3b_qwen3.5-9b.jsonl
 #
-# Defaults to partition gpu17 / 10 CPUs / 8h (the #SBATCH lines above).
-# Override at submit time if gpu17 is busy -- sbatch command-line flags win
+# Defaults to partition gpu-a100 / 10 CPUs / 8h (the #SBATCH lines above).
+# Override at submit time if gpu-a100 is busy -- sbatch command-line flags win
 # over the #SBATCH lines in this script:
 #   sbatch --partition=gpu22 --time=12:00:00 slurm/build_t3b.sbatch qwen3-8b
 # Check `sinfo` to see what's free.
