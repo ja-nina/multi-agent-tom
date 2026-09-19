@@ -1,4 +1,14 @@
-from personabind.binding.battery import VERDICT_ROWS, clears_baseline, gate_variant
+import json
+
+import pytest
+
+from personabind.binding.battery import (
+    VERDICT_ROWS,
+    _config_hash,
+    clears_baseline,
+    gate_variant,
+    write_verdict,
+)
 
 
 def test_clears_baseline_true_with_adjacent_layer_support():
@@ -51,3 +61,39 @@ def test_verdict_rows_match_spec_table():
     assert any("Graded traits don't bind" in m for m in messages)
     assert any("Stated traits bind, inferred don't" in m for m in messages)
     assert any("Proceed to Phase 2" in m for m in messages)
+
+
+def test_config_hash_is_deterministic():
+    config = {"seed": 1, "sample_size": 300, "layer_sweep": [0, 1, 2]}
+    assert _config_hash(config) == _config_hash(dict(config))
+
+
+def test_config_hash_is_sensitive_to_config_changes():
+    base = {"seed": 1, "sample_size": 300, "layer_sweep": [0, 1, 2]}
+    changed_sample = {**base, "sample_size": 100}
+    changed_sweep = {**base, "layer_sweep": [0, 1]}
+    assert _config_hash(base) != _config_hash(changed_sample)
+    assert _config_hash(base) != _config_hash(changed_sweep)
+    assert _config_hash(changed_sample) != _config_hash(changed_sweep)
+
+
+def test_config_hash_ignores_key_order():
+    # sort_keys=True: two configs that differ only in insertion order are the
+    # same config and must stamp the same hash onto their result rows.
+    assert _config_hash({"a": 1, "b": 2}) == _config_hash({"b": 2, "a": 1})
+
+
+def test_write_verdict_rejects_unknown_verdict_key(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        write_verdict("m/x", str(tmp_path), "not_a_real_key", {})
+    assert "not_a_real_key" in str(excinfo.value)
+
+
+def test_write_verdict_creates_missing_output_dir(tmp_path):
+    output_dir = tmp_path / "does" / "not" / "exist"
+    path = write_verdict("org/model", str(output_dir), "all_pass", {"t1_discrete": {"passed": True}})
+    assert (output_dir / "org_model_verdict.json").exists()
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert payload["verdict"] == "all_pass"
+    assert "Proceed to Phase 2" in payload["message"]

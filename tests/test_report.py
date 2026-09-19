@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from personabind.binding.report import (
     aggregate_intervention_results,
     entanglement_flag,
@@ -57,13 +59,13 @@ def test_gate_flags_both_halves_of_c3_on_name_confound(tmp_path):
     assert result["name_chi2_p"] <= 0.05
 
 
-def _result(layer, on_target, baseline, off_target=0.01):
+def _result(layer, on_target, baseline, off_target=0.01, coefficient=1.0, record_id="r"):
     return InterventionResult(
-        test="factorizability", record_id="r", model="m", variant="t1_discrete",
+        test="factorizability", record_id=record_id, model="m", variant="t1_discrete",
         layer=layer, layer_type="full_attention", patch_site="stored",
         token_positions={"patched": 1, "read_on_target": 2, "read_off_target": 3},
         effect_on_target=on_target, effect_norm_matched_random=baseline,
-        effect_off_target=off_target, coefficient=1.0, direction_norm_fraction=None,
+        effect_off_target=off_target, coefficient=coefficient, direction_norm_fraction=None,
         train_test_split="n/a", seed=1, config_hash="abc",
     )
 
@@ -80,6 +82,43 @@ def test_aggregate_intervention_results_groups_by_layer():
     assert set(grouped.keys()) == {5, 6}
     mean5, _se5 = grouped[5]
     assert 0.4 < mean5 < 0.5  # roughly (0.5-0.02 + 0.4-0.03)/2, close to 0.425
+
+
+def test_aggregate_intervention_results_default_key_still_pools_by_layer():
+    """Backward compatibility with factorizability's usage: with no `key`, rows at
+    the same layer pool together even when they differ in coefficient."""
+    results = [
+        _result(5, 0.5, 0.0, coefficient=1.0),
+        _result(5, 0.1, 0.0, coefficient=2.0),
+    ]
+    grouped = aggregate_intervention_results(results)
+    assert set(grouped.keys()) == {5}
+    mean5, _se5 = grouped[5]
+    assert mean5 == pytest.approx(0.3)
+
+
+def test_aggregate_intervention_results_does_not_pool_across_coefficients():
+    """Mean-intervention emits one row per record PER COEFFICIENT. Keying on
+    (layer, coefficient) must give each coefficient its own group computed from
+    only its own rows -- pooling them would treat the same record's repeated
+    measurements as independent observations and understate the SE."""
+    results = [
+        _result(5, 0.50, 0.0, coefficient=1.0, record_id="a"),
+        _result(5, 0.30, 0.0, coefficient=1.0, record_id="b"),
+        _result(5, 0.10, 0.0, coefficient=2.0, record_id="a"),
+        _result(5, 0.30, 0.0, coefficient=2.0, record_id="b"),
+        _result(6, 0.20, 0.0, coefficient=1.0, record_id="a"),
+    ]
+    grouped = aggregate_intervention_results(results, key=lambda r: (r.layer, r.coefficient))
+    assert set(grouped.keys()) == {(5, 1.0), (5, 2.0), (6, 1.0)}
+    assert grouped[(5, 1.0)][0] == pytest.approx(0.40)  # only the coefficient-1.0 rows
+    assert grouped[(5, 2.0)][0] == pytest.approx(0.20)  # only the coefficient-2.0 rows
+    assert grouped[(6, 1.0)] == (pytest.approx(0.20), 0.0)  # n=1 -> SE 0.0
+    # and the pooled-by-layer SE is smaller than either per-coefficient SE, which
+    # is exactly the inflation this keying avoids.
+    pooled_se = aggregate_intervention_results(results)[5][1]
+    assert pooled_se < grouped[(5, 1.0)][1]
+    assert pooled_se < grouped[(5, 2.0)][1]
 
 
 def test_entanglement_flag():

@@ -13,11 +13,24 @@ def mean_and_se(values: list[float]) -> tuple[float, float]:
     return mean, se
 
 
-def aggregate_intervention_results(results: list) -> dict[int, tuple[float, float]]:
-    by_layer: dict[int, list[float]] = {}
+def aggregate_intervention_results(results: list, key=lambda r: r.layer) -> dict:
+    """Group `results` by `key(r)` and reduce each group to (mean, SE) of the
+    paired difference (effect_on_target - effect_norm_matched_random).
+
+    `key` defaults to the layer alone, which is correct for factorizability
+    (one row per pair per layer, already filtered to a single patch site). It
+    MUST be widened for any test that emits several rows per record at the same
+    layer -- notably mean-intervention, which emits one row per coefficient:
+    pooling those would treat the same record's repeated measurements as
+    independent observations, inflating n and understating the SE. Callers there
+    pass `key=lambda r: (r.layer, r.coefficient)`.
+
+    Returns a dict keyed by whatever `key(r)` produces -> (mean, standard error).
+    """
+    grouped: dict = {}
     for r in results:
-        by_layer.setdefault(r.layer, []).append(r.effect_on_target - r.effect_norm_matched_random)
-    return {layer: mean_and_se(diffs) for layer, diffs in by_layer.items()}
+        grouped.setdefault(key(r), []).append(r.effect_on_target - r.effect_norm_matched_random)
+    return {k: mean_and_se(diffs) for k, diffs in grouped.items()}
 
 
 def entanglement_flag(effect_on_target: float, effect_off_target: float | None) -> bool:
