@@ -1,0 +1,12 @@
+seed: 20260910
+models: [Qwen/Qwen3-4B, Qwen/Qwen3-8B]
+variants: [t1_discrete, t2_graded, t3a_inferred_templated]
+dataset_dir: data/
+sample_size: 1000
+train_fraction: 0.5
+layer_sweep: all
+accuracy_floor: 0.90
+causal_clear_margin: 2.0
+mean_intervention_coefficients: [0.5, 1.0, 2.0, 4.0]
+output_dir: results/binding
+dtype: bfloat16

@@ -67,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--all", action="store_true")
     r.add_argument("--config", default="configs/generator.yaml")
 
+    bind = sub.add_parser("binding")
+    bind_sub = bind.add_subparsers(dest="binding_cmd", required=True)
+    bind_run = bind_sub.add_parser("run")
+    bind_run.add_argument("--model", required=True)
+    bind_run.add_argument("--config", default="configs/binding.yaml")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "build":
@@ -77,6 +83,18 @@ def main(argv: list[str] | None = None) -> int:
             _build_one(k, cfg)
             print(f"built {k} -> {cfg.output_dir}")
         return 0
+
+    if args.cmd == "binding":
+        import yaml
+
+        from personabind.binding.battery import run_battery
+
+        with open(args.config, encoding="utf-8") as fh:
+            binding_config = yaml.safe_load(fh)
+        if args.binding_cmd == "run":
+            result = run_battery(args.model, binding_config)
+            print(f"verdict: {result['verdict']} -> {result['verdict_path']}")
+            return 0
 
     # report
     if args.all:
