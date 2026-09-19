@@ -1769,7 +1769,8 @@ def run_mean_intervention(
 
                 results.append(InterventionResult(
                     test="mean_intervention", record_id=record.id, model=handle.model_id,
-                    variant=record.variant, layer=layer, layer_type="full_attention",
+                    variant=record.variant, layer=layer,
+                    layer_type=handle.layer_types[layer] if handle.layer_types else "full_attention",
                     patch_site="stored",
                     token_positions={"patched": pos, "read_on_target": answer_position(tokenized), "read_off_target": other_read_pos},
                     effect_on_target=effect_on_target, effect_norm_matched_random=effect_baseline,
@@ -2076,7 +2077,6 @@ def entanglement_flag(effect_on_target: float, effect_off_target: float | None) 
 
 ```python
 def run_battery(model_id: str, config: dict) -> dict:
-    import glob
     import os
     import random
 
@@ -2258,14 +2258,18 @@ def test_binding_run_subcommand_writes_a_verdict(tmp_path, monkeypatch):
     dataset_dir.mkdir()
     records = []
     for i in range(4):
+        pair_idx = i // 2  # base/twin share names -- only trait/level swap between them,
+        # matching generator/build.py's real counterfactual-pair semantics (see Task 11's
+        # fix round, which found the per-record-index-naming version of this fixture makes
+        # trait_of() raise StopIteration inside run_factorizability's off-target lookup).
         level = i % 2
         trait, other = ("expert", "novice") if level == 1 else ("novice", "expert")
         records.append(Record(
             id=f"t1_{i:06d}", variant="t1_discrete", format="same_sentence", domain="science",
-            name_style="personal", context=f"Doug{i} is an {trait}; Charles{i} is a {other}.",
-            question=f"How reliable is Doug{i}?", answer_prefix=f"Doug{i} is",
-            agents=[AgentSpec(f"Doug{i}", 0, trait, level), AgentSpec(f"Charles{i}", 1, other, 1 - level)],
-            query_agent=f"Doug{i}", answer=trait,
+            name_style="personal", context=f"Doug{pair_idx} is an {trait}; Charles{pair_idx} is a {other}.",
+            question=f"How reliable is Doug{pair_idx}?", answer_prefix=f"Doug{pair_idx} is",
+            agents=[AgentSpec(f"Doug{pair_idx}", 0, trait, level), AgentSpec(f"Charles{pair_idx}", 1, other, 1 - level)],
+            query_agent=f"Doug{pair_idx}", answer=trait,
             counterfactual_id=f"t1_{i + 1:06d}" if i % 2 == 0 else f"t1_{i - 1:06d}",
             counterfactual_diff="agent_trait_map", seed=1,
         ))
