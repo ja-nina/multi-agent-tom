@@ -7,6 +7,25 @@ def test_clears_baseline_true_with_adjacent_layer_support():
     assert clears_baseline(effects, margin=2.0) is True
 
 
+def test_clears_baseline_true_neighbor_at_half_margin():
+    """Test that neighbor at half-margin threshold (1.5 SEs with margin=2.0) clears.
+    This is strictly between half-margin (1.0) and full-margin (2.0).
+    If the half-margin check is buggy and uses full margin instead, this fails."""
+    effects = {5: (0.4, 0.1), 6: (0.15, 0.1)}
+    # layer 5: 0.4/0.1 = 4 SEs (>= 2.0 margin, clears anchor)
+    # layer 6: 0.15/0.1 = 1.5 SEs (>= 1.0 half-margin, should pass)
+    assert clears_baseline(effects, margin=2.0) is True
+
+
+def test_clears_baseline_false_neighbor_below_half_margin():
+    """Test that neighbor below half-margin threshold (0.9 SEs with margin=2.0) does not clear.
+    Pins the lower boundary of the half-margin check."""
+    effects = {5: (0.4, 0.1), 6: (0.09, 0.1)}
+    # layer 5: 0.4/0.1 = 4 SEs (>= 2.0 margin, clears anchor)
+    # layer 6: 0.09/0.1 = 0.9 SEs (< 1.0 half-margin, should fail)
+    assert clears_baseline(effects, margin=2.0) is False
+
+
 def test_clears_baseline_false_for_isolated_single_layer_spike():
     effects = {5: (0.5, 0.1), 6: (0.01, 0.1), 7: (0.01, 0.1)}  # layer 5 clears alone; neighbors don't
     assert clears_baseline(effects, margin=2.0) is False
