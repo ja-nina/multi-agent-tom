@@ -51,6 +51,27 @@ def gate_variant(
     return clears_baseline(causal_effects_by_layer, causal_clear_margin)
 
 
+def _merge_causal_effects(
+    causal_effects_by_layer: dict[int, tuple[float, float]],
+    mi_effects: dict[int, tuple[float, float]],
+) -> dict[int, tuple[float, float]]:
+    """Merge mean-intervention's per-layer effects into factorizability's,
+    keeping whichever has the larger SIGNED sigma at each layer -- never
+    abs(): a strongly NEGATIVE mean-intervention effect (a mis-signed
+    direction, or noise) must not displace factorizability's genuine
+    positive effect at the same layer. Spec S8 requires "at least one causal
+    test clears baseline", not "whichever test has the largest-magnitude
+    effect in either direction"."""
+    merged = dict(causal_effects_by_layer)
+    for layer, (mean_diff, se) in mi_effects.items():
+        existing_mean, existing_se = merged.get(layer, (0.0, 1.0))
+        existing_sigma = (existing_mean / existing_se) if existing_se else float("-inf")
+        mi_sigma = (mean_diff / se) if se else float("-inf")
+        if mi_sigma > existing_sigma:
+            merged[layer] = (mean_diff, se)
+    return merged
+
+
 def write_verdict(model_id: str, output_dir: str, verdict_key: str, per_variant: dict) -> str:
     try:
         message = next(msg for key, msg in VERDICT_ROWS if key == verdict_key)
@@ -169,15 +190,7 @@ def run_battery(model_id: str, config: dict) -> dict:
                         existing_sigma = (existing[0] / existing[1]) if existing and existing[1] else float("-inf")
                         if existing is None or sigma > existing_sigma:
                             mi_effects[layer] = (mean_diff, se)
-                    for layer, (mean_diff, se) in mi_effects.items():
-                        # SIGNED comparison, never abs(): a strongly NEGATIVE
-                        # mean-intervention effect must not displace factorizability's
-                        # genuine positive effect at the same layer.
-                        existing_mean, existing_se = causal_effects_by_layer.get(layer, (0.0, 1.0))
-                        existing_sigma = (existing_mean / existing_se) if existing_se else float("-inf")
-                        mi_sigma = (mean_diff / se) if se else float("-inf")
-                        if mi_sigma > existing_sigma:
-                            causal_effects_by_layer[layer] = (mean_diff, se)
+                    causal_effects_by_layer = _merge_causal_effects(causal_effects_by_layer, mi_effects)
 
         passed = gate_variant(acc_summary["accuracy"], causal_effects_by_layer, config["accuracy_floor"], config["causal_clear_margin"])
         per_variant[variant] = {"accuracy": acc_summary, "passed": passed}

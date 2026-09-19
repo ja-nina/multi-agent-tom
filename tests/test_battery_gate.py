@@ -5,6 +5,7 @@ import pytest
 from personabind.binding.battery import (
     VERDICT_ROWS,
     _config_hash,
+    _merge_causal_effects,
     clears_baseline,
     gate_variant,
     write_verdict,
@@ -97,3 +98,33 @@ def test_write_verdict_creates_missing_output_dir(tmp_path):
         payload = json.load(fh)
     assert payload["verdict"] == "all_pass"
     assert "Proceed to Phase 2" in payload["message"]
+
+
+def test_merge_causal_effects_uses_signed_comparison_not_abs():
+    # A strongly NEGATIVE mean-intervention effect must never displace a
+    # smaller but genuinely POSITIVE factorizability effect at the same
+    # layer -- an abs()-based comparison would pick the negative one here
+    # (|-20.0| > |3.0|), silently rejecting a layer that should pass.
+    factorizability_effects = {5: (0.3, 0.1)}  # sigma = 3.0
+    mi_effects = {5: (-2.0, 0.1)}  # sigma = -20.0, larger in magnitude, wrong sign
+    merged = _merge_causal_effects(factorizability_effects, mi_effects)
+    assert merged[5] == (0.3, 0.1)
+
+
+def test_merge_causal_effects_prefers_larger_positive_sigma():
+    factorizability_effects = {5: (0.1, 0.1)}  # sigma = 1.0
+    mi_effects = {5: (0.5, 0.1)}  # sigma = 5.0, genuinely stronger
+    merged = _merge_causal_effects(factorizability_effects, mi_effects)
+    assert merged[5] == (0.5, 0.1)
+
+
+def test_merge_causal_effects_adds_a_layer_absent_from_factorizability():
+    merged = _merge_causal_effects({}, {7: (0.2, 0.1)})
+    assert merged[7] == (0.2, 0.1)
+
+
+def test_merge_causal_effects_does_not_mutate_its_inputs():
+    factorizability_effects = {5: (0.1, 0.1)}
+    mi_effects = {5: (0.5, 0.1)}
+    _merge_causal_effects(factorizability_effects, mi_effects)
+    assert factorizability_effects == {5: (0.1, 0.1)}
