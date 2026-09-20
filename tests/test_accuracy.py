@@ -102,3 +102,53 @@ def test_aggregate_accuracy_raises_on_empty_results():
     """Test that aggregate_accuracy raises ValueError (not ZeroDivisionError) on empty results."""
     with pytest.raises(ValueError, match="aggregate_accuracy: results is empty"):
         aggregate_accuracy([])
+
+
+def test_run_accuracy_computes_n_tokens_from_leading_space_tokenization():
+    """Regression test for a real bug found on the first actual Qwen3-8B run:
+    T1 accuracy read ~50% (chance, on a balanced dataset) even though the
+    model predicted the correct trait in every sampled row -- because gold_ids
+    was computed by tokenizing the BARE answer ("novice", no leading space),
+    which needed 2 tokens, while the model's real in-context completion
+    (preceded by a space, since answer_prefix never ends in one) is 1 token.
+    greedy_decode was asked for one superfluous token every time, and filled
+    it with a comma. tiny-gpt2's real GPT-2 tokenizer reproduces this exact
+    split for "novice": bare -> 2 tokens, " novice" -> 1 token."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="novice")
+    captured = {}
+
+    def spy(handle_arg, input_ids, n_tokens):
+        captured["n_tokens"] = n_tokens
+        return "novice"
+
+    with patch("personabind.binding.accuracy.greedy_decode", side_effect=spy):
+        run_accuracy(handle, [record], seed=1)
+
+    bare_n_tokens = len(handle._tokenizer("novice", add_special_tokens=False).input_ids)
+    spaced_n_tokens = len(handle._tokenizer(" novice", add_special_tokens=False).input_ids)
+    assert bare_n_tokens != spaced_n_tokens, "fixture word no longer discriminates -- pick another"
+    assert captured["n_tokens"] == spaced_n_tokens
+
+
+def test_accuracy_strips_trailing_punctuation_before_comparing():
+    """A model that appends stray trailing punctuation after an otherwise
+    correct full-string answer (e.g. "novice," instead of "novice" -- the
+    exact pattern Qwen3-8B produced) must not be marked incorrect for it."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="novice")
+    with patch("personabind.binding.accuracy.greedy_decode", return_value="novice,"):
+        results = run_accuracy(handle, [record], seed=1)
+    assert results[0].correct is True
+    assert results[0].predicted == "novice,"  # raw prediction still recorded verbatim
+
+
+def test_accuracy_trailing_punctuation_strip_does_not_credit_a_longer_diverging_answer():
+    """Guard against a naive fix (e.g. startswith/prefix credit) that would
+    wrongly mark a longer, genuinely different completion as correct just
+    because it happens to start with the gold word."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="novice")
+    with patch("personabind.binding.accuracy.greedy_decode", return_value="novice versed in many things"):
+        results = run_accuracy(handle, [record], seed=1)
+    assert results[0].correct is False
