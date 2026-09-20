@@ -6,33 +6,60 @@ import torch
 from personabind.binding.accuracy import (
     aggregate_accuracy,
     clopper_pearson_ci,
-    greedy_decode,
     run_accuracy,
+    sequence_logprob,
 )
 from personabind.binding.results import AccuracyResult
-from personabind.common.activations import load_model
+from personabind.common.activations import forward_logits, load_model
 from personabind.record import AgentSpec, Record
 
 TINY_MODEL = "sshleifer/tiny-gpt2"
 
 
-def _record(answer="expert"):
+def _record(answer="expert", other_trait="novice"):
     return Record(
         id="t1_1", variant="t1_discrete", format="same_sentence", domain="science",
         name_style="personal", context="Doug is an expert; Charles is a novice.",
-        question="How reliable is Doug?", answer_prefix="Doug is an",
-        agents=[AgentSpec("Doug", 0, "expert", 1), AgentSpec("Charles", 1, "novice", 0)],
+        question="How reliable is Doug?", answer_prefix="Doug is",
+        agents=[AgentSpec("Doug", 0, answer, 1), AgentSpec("Charles", 1, other_trait, 0)],
         query_agent="Doug", answer=answer,
         counterfactual_id="t1_2", counterfactual_diff="agent_trait_map", seed=1,
     )
 
 
-def test_greedy_decode_returns_a_string_of_requested_length_tokens():
+def test_sequence_logprob_sums_across_all_candidate_tokens():
+    """Regression guard for the exact bug this design was chosen to avoid:
+    comparing only each candidate's FIRST token would structurally
+    disadvantage a longer candidate, since its first subword is diluted
+    across every other word that starts the same way. sequence_logprob must
+    genuinely SUM the joint log-probability across every candidate token
+    (via teacher forcing), not just read the first one."""
     handle = load_model(TINY_MODEL, dtype=torch.float32)
-    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
-    decoded = greedy_decode(handle, ids, n_tokens=3)
-    assert isinstance(decoded, str)
-    assert len(handle._tokenizer(decoded, add_special_tokens=False).input_ids) == 3
+    prompt_ids = handle._tokenizer(
+        "Doug is an expert; Charles is a novice.\nHow reliable is Doug?\nDoug is",
+        return_tensors="pt",
+    ).input_ids
+    candidate_ids = handle._tokenizer(" quite reliable", add_special_tokens=False).input_ids
+    assert len(candidate_ids) >= 2, "fixture candidate must be multi-token to discriminate summation from a first-token shortcut"
+
+    total = sequence_logprob(handle, prompt_ids, candidate_ids)
+
+    # Hand-compute the same joint logprob via teacher forcing, one token at a
+    # time, independently of sequence_logprob's own implementation.
+    running_ids = prompt_ids
+    expected_total = 0.0
+    for token_id in candidate_ids:
+        logits = forward_logits(handle, running_ids)
+        log_probs = torch.log_softmax(logits[0, -1], dim=-1)
+        expected_total += float(log_probs[token_id])
+        running_ids = torch.cat([running_ids, torch.tensor([[token_id]])], dim=1)
+    assert total == pytest.approx(expected_total, abs=1e-4)
+
+    # And prove it's NOT just the first token's logprob in disguise.
+    first_token_only = float(
+        torch.log_softmax(forward_logits(handle, prompt_ids)[0, -1], dim=-1)[candidate_ids[0]]
+    )
+    assert total != pytest.approx(first_token_only, abs=1e-4)
 
 
 def test_run_accuracy_produces_one_result_per_record_with_real_fields():
@@ -43,9 +70,62 @@ def test_run_accuracy_produces_one_result_per_record_with_real_fields():
     assert isinstance(r, AccuracyResult)
     assert r.gold == "expert"
     assert r.record_id == "t1_1"
-    # tiny-gpt2 is randomly initialized -- do not assert r.correct, only that the
-    # comparison is a genuine full-string one, not a first-token shortcut:
-    assert r.predicted == r.predicted.strip()
+    # forced choice: the prediction must be one of the two traits actually
+    # present in this record's own scenario, never free text.
+    assert r.predicted in ("expert", "novice")
+
+
+def test_run_accuracy_is_a_genuine_forced_choice_not_first_token_only():
+    """Regression test: run_accuracy must score each candidate via its FULL
+    token sequence, never truncate to a first-token comparison (which would
+    structurally disadvantage a longer candidate). Uses a deliberately
+    multi-token trait as the record's own answer and spies on the actual
+    calls into sequence_logprob to confirm the complete token list -- not a
+    length-1 slice of it -- is what gets scored for both candidates."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="quite reliable", other_trait="novice")
+
+    calls = []
+    real_sequence_logprob = sequence_logprob
+
+    def spy(handle_arg, prompt_ids, candidate_ids):
+        calls.append(list(candidate_ids))
+        return real_sequence_logprob(handle_arg, prompt_ids, candidate_ids)
+
+    with patch("personabind.binding.accuracy.sequence_logprob", side_effect=spy):
+        run_accuracy(handle, [record], seed=1)
+
+    quite_reliable_ids = handle._tokenizer(" quite reliable", add_special_tokens=False).input_ids
+    novice_ids = handle._tokenizer(" novice", add_special_tokens=False).input_ids
+    assert len(quite_reliable_ids) >= 2, "fixture must be multi-token to discriminate"
+    assert quite_reliable_ids in calls, "the record's own (multi-token) trait was never scored as a full sequence"
+    assert novice_ids in calls, "the OTHER agent's trait was never scored -- forced choice needs both candidates"
+
+
+def test_run_accuracy_predicted_is_whichever_candidate_has_higher_logprob():
+    """Force each candidate's logprob deterministically (tiny-gpt2's weights
+    are random, so the real ordering can't be predicted analytically) and
+    confirm run_accuracy picks the winner correctly in both directions."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="expert", other_trait="novice")
+
+    def fake_logprob(handle_arg, prompt_ids, candidate_ids):
+        expert_ids = handle_arg._tokenizer(" expert", add_special_tokens=False).input_ids
+        return -1.0 if candidate_ids == expert_ids else -5.0
+
+    with patch("personabind.binding.accuracy.sequence_logprob", side_effect=fake_logprob):
+        results = run_accuracy(handle, [record], seed=1)
+    assert results[0].predicted == "expert"
+    assert results[0].correct is True
+
+    def fake_logprob_reversed(handle_arg, prompt_ids, candidate_ids):
+        expert_ids = handle_arg._tokenizer(" expert", add_special_tokens=False).input_ids
+        return -5.0 if candidate_ids == expert_ids else -1.0
+
+    with patch("personabind.binding.accuracy.sequence_logprob", side_effect=fake_logprob_reversed):
+        results = run_accuracy(handle, [record], seed=1)
+    assert results[0].predicted == "novice"
+    assert results[0].correct is False
 
 
 def test_clopper_pearson_ci_bounds_contain_the_point_estimate():
@@ -71,84 +151,7 @@ def test_aggregate_accuracy_computes_rate_and_ci():
     assert agg["ci_low"] < 0.9 < agg["ci_high"]
 
 
-def test_accuracy_full_string_not_first_token_diverging():
-    """Test that correct comparison requires full-string match, not just first-token match."""
-    handle = load_model(TINY_MODEL, dtype=torch.float32)
-    # Gold: "first-year student", Predicted: "first-class citizen"
-    # Same first token but diverging later
-    record = _record(answer="first-year student")
-    with patch("personabind.binding.accuracy.greedy_decode", return_value="first-class citizen"):
-        results = run_accuracy(handle, [record], seed=1)
-    assert len(results) == 1
-    assert results[0].gold == "first-year student"
-    assert results[0].predicted == "first-class citizen"
-    assert results[0].correct is False
-
-
-def test_accuracy_full_string_exact_match_after_normalization():
-    """Test that correct comparison accepts exact match after case/whitespace normalization."""
-    handle = load_model(TINY_MODEL, dtype=torch.float32)
-    record = _record(answer="Expert")
-    # Predicted has different case and extra whitespace
-    with patch("personabind.binding.accuracy.greedy_decode", return_value="  EXPERT  "):
-        results = run_accuracy(handle, [record], seed=1)
-    assert len(results) == 1
-    assert results[0].gold == "Expert"
-    assert results[0].predicted == "  EXPERT  "
-    assert results[0].correct is True
-
-
 def test_aggregate_accuracy_raises_on_empty_results():
     """Test that aggregate_accuracy raises ValueError (not ZeroDivisionError) on empty results."""
     with pytest.raises(ValueError, match="aggregate_accuracy: results is empty"):
         aggregate_accuracy([])
-
-
-def test_run_accuracy_computes_n_tokens_from_leading_space_tokenization():
-    """Regression test for a real bug found on the first actual Qwen3-8B run:
-    T1 accuracy read ~50% (chance, on a balanced dataset) even though the
-    model predicted the correct trait in every sampled row -- because gold_ids
-    was computed by tokenizing the BARE answer ("novice", no leading space),
-    which needed 2 tokens, while the model's real in-context completion
-    (preceded by a space, since answer_prefix never ends in one) is 1 token.
-    greedy_decode was asked for one superfluous token every time, and filled
-    it with a comma. tiny-gpt2's real GPT-2 tokenizer reproduces this exact
-    split for "novice": bare -> 2 tokens, " novice" -> 1 token."""
-    handle = load_model(TINY_MODEL, dtype=torch.float32)
-    record = _record(answer="novice")
-    captured = {}
-
-    def spy(handle_arg, input_ids, n_tokens):
-        captured["n_tokens"] = n_tokens
-        return "novice"
-
-    with patch("personabind.binding.accuracy.greedy_decode", side_effect=spy):
-        run_accuracy(handle, [record], seed=1)
-
-    bare_n_tokens = len(handle._tokenizer("novice", add_special_tokens=False).input_ids)
-    spaced_n_tokens = len(handle._tokenizer(" novice", add_special_tokens=False).input_ids)
-    assert bare_n_tokens != spaced_n_tokens, "fixture word no longer discriminates -- pick another"
-    assert captured["n_tokens"] == spaced_n_tokens
-
-
-def test_accuracy_strips_trailing_punctuation_before_comparing():
-    """A model that appends stray trailing punctuation after an otherwise
-    correct full-string answer (e.g. "novice," instead of "novice" -- the
-    exact pattern Qwen3-8B produced) must not be marked incorrect for it."""
-    handle = load_model(TINY_MODEL, dtype=torch.float32)
-    record = _record(answer="novice")
-    with patch("personabind.binding.accuracy.greedy_decode", return_value="novice,"):
-        results = run_accuracy(handle, [record], seed=1)
-    assert results[0].correct is True
-    assert results[0].predicted == "novice,"  # raw prediction still recorded verbatim
-
-
-def test_accuracy_trailing_punctuation_strip_does_not_credit_a_longer_diverging_answer():
-    """Guard against a naive fix (e.g. startswith/prefix credit) that would
-    wrongly mark a longer, genuinely different completion as correct just
-    because it happens to start with the gold word."""
-    handle = load_model(TINY_MODEL, dtype=torch.float32)
-    record = _record(answer="novice")
-    with patch("personabind.binding.accuracy.greedy_decode", return_value="novice versed in many things"):
-        results = run_accuracy(handle, [record], seed=1)
-    assert results[0].correct is False

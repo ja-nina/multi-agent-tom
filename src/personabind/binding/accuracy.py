@@ -1,8 +1,25 @@
 """Test 1: behavioral accuracy -- can the model retrieve the bound trait at
-all, before any mechanistic claim is made about how. Establishes the
-tokenize -> forward/greedy-decode -> compare -> build a result pattern that
-the other binding-battery tests (interventions, position generalization)
-follow.
+all, before any mechanistic claim is made about how.
+
+Forced-choice: compares the FULL joint log-probability of each record's two
+present trait values (the query agent's own trait, and the other agent's)
+rather than free generation + string match. Free generation was tried first
+and found, on a real model (Qwen3-4B), to be an unreliable measurement for
+T3a/T3b specifically: the model's correct judgment is often phrased as a
+paraphrase ("not reliable", "that's correct") that a single forced generation
+token, compared against a literal gold word, can neither produce nor
+recognize -- the model wasn't wrong, the measurement was. Forced-choice
+between the two traits ACTUALLY PRESENT in this record's own scenario
+sidesteps free-text vocabulary entirely, and matches the same methodology
+tests 2 and 4 already use for their own on-target measurements.
+
+Comparing only each candidate's FIRST token would reintroduce a subtler bias:
+"reliable" and "unreliable" (or T2's multi-word tiers) can tokenize to
+different lengths, and a longer candidate's first subword (e.g. "un") is
+shared by many other words, diluting its probability mass relative to a
+single-token candidate. `_sequence_logprob` scores the whole candidate
+sequence via teacher forcing instead, in one forward pass, so candidates of
+different token lengths are compared fairly.
 """
 
 from __future__ import annotations
@@ -13,60 +30,52 @@ import torch
 from scipy.stats import beta
 from tqdm import tqdm
 
-from personabind.binding.positions import answer_position, tokenize_record
+from personabind.binding.positions import answer_position, tokenize_record, trait_of
 from personabind.binding.results import AccuracyResult
 from personabind.common.activations import ModelHandle, forward_logits
 from personabind.record import Record
 
 
-def greedy_decode(handle: ModelHandle, input_ids: torch.Tensor, n_tokens: int) -> str:
-    ids = input_ids.clone()
-    for _ in range(n_tokens):
-        logits = forward_logits(handle, ids)
-        next_id = logits[0, -1].argmax().item()
-        ids = torch.cat([ids, torch.tensor([[next_id]])], dim=1)
-    new_ids = ids[0, input_ids.shape[1]:].tolist()
-    return handle._tokenizer.decode(new_ids).strip()
+def _token_ids_for(handle: ModelHandle, word: str) -> list[int]:
+    """Tokenize WITH a leading space: `answer_prefix` never ends in one, so
+    this must match how the model would tokenize the word IN CONTEXT, not
+    tokenized bare out of context (which can be a different number of
+    tokens entirely for the same word)."""
+    return handle._tokenizer(" " + word, add_special_tokens=False).input_ids
 
 
-_TRAILING_PUNCTUATION = ",.;:!?"
-
-
-def _normalize_for_comparison(text: str) -> str:
-    """Strip only TRAILING punctuation before comparing, never truncate to a
-    prefix. Chat-tuned models commonly append a stray comma/period as a
-    continuation habit (e.g. "novice," instead of "novice") even when the
-    substantive answer is already fully correct -- this must not count
-    against them. This is still a full-string comparison, not a first-token
-    shortcut: "first-year student" vs "first-class citizen" still differ
-    after stripping trailing punctuation."""
-    return text.strip().rstrip(_TRAILING_PUNCTUATION).strip().lower()
+def sequence_logprob(handle: ModelHandle, prompt_ids: torch.Tensor, candidate_ids: list[int]) -> float:
+    """log P(candidate_ids | prompt_ids): the joint log-probability of the
+    WHOLE candidate token sequence, computed in one forward pass via teacher
+    forcing (the candidate's own tokens are appended to the prompt, so each
+    position's logits score the next REAL candidate token, never a sampled
+    or greedily-chosen one)."""
+    full_ids = torch.cat([prompt_ids, torch.tensor([candidate_ids])], dim=1)
+    logits = forward_logits(handle, full_ids)
+    prompt_len = prompt_ids.shape[1]
+    total = 0.0
+    for i, token_id in enumerate(candidate_ids):
+        log_probs = torch.log_softmax(logits[0, prompt_len - 1 + i], dim=-1)
+        total += float(log_probs[token_id])
+    return total
 
 
 def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[AccuracyResult]:
     results = []
     for record in tqdm(records, desc="accuracy", unit="record", file=sys.stdout):
         tokenized = tokenize_record(record, handle._tokenizer)
-        # Tokenize WITH a leading space: `answer_prefix` never ends in one, so
-        # the model's real in-context completion is however this tokenizer
-        # splits " {answer}", not however it splits the bare word out of
-        # context -- BPE tokenizers routinely need a different token COUNT
-        # for the two (e.g. tiny-gpt2/GPT-2: bare "novice" -> 2 tokens,
-        # " novice" -> 1). Using the bare count is not a rounding error: it
-        # asks greedy_decode for the wrong number of tokens outright, and on
-        # a real run (Qwen3-8B) this silently produced a superfluous extra
-        # token every time, floor-compressing T1 accuracy to ~50% even though
-        # the model predicted the correct trait in every sampled row.
-        gold_ids = handle._tokenizer(" " + record.answer, add_special_tokens=False).input_ids
-        prefix_ids = torch.tensor([tokenized.input_ids[: answer_position(tokenized) + 1]])
-        decoded = greedy_decode(handle, prefix_ids, n_tokens=max(1, len(gold_ids)))
-        # Full-string comparison, never just the first token -- trait phrases
-        # like "first-year student" must not be credited for merely starting
-        # with "first".
-        correct = _normalize_for_comparison(decoded) == _normalize_for_comparison(record.answer)
+        prompt_ids = torch.tensor([tokenized.input_ids[: answer_position(tokenized) + 1]])
+
+        other_agent = next(a.name for a in record.agents if a.name != record.query_agent)
+        other_trait = trait_of(record, other_agent)
+
+        own_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, record.answer))
+        other_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, other_trait))
+
+        predicted = record.answer if own_logprob > other_logprob else other_trait
         results.append(AccuracyResult(
             model=handle.model_id, variant=record.variant, record_id=record.id,
-            predicted=decoded, gold=record.answer, correct=correct, seed=seed,
+            predicted=predicted, gold=record.answer, correct=predicted == record.answer, seed=seed,
         ))
     return results
 
