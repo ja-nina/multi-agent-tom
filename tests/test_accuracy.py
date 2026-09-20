@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from personabind.binding.accuracy import (
+    _mc_answer_prefix,
+    _own_trait_is_a,
     aggregate_accuracy,
     clopper_pearson_ci,
     run_accuracy,
@@ -66,9 +68,98 @@ def test_sequence_logprob_sums_across_all_candidate_tokens():
 def test_sample_free_completion_returns_a_string_of_requested_length_tokens():
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
-    decoded = sample_free_completion(handle, ids, n_tokens=3)
+    decoded = sample_free_completion(handle, ids, seed=1, n_tokens=3)
     assert isinstance(decoded, str)
     assert len(handle._tokenizer(decoded, add_special_tokens=False).input_ids) == 3
+
+
+def test_sample_free_completion_stops_early_at_eos_instead_of_forcing_n_tokens():
+    """Regression guard for the exact bug that made completions look 'weird':
+    a fixed n_tokens loop with no EOS-awareness forces generation well past
+    whatever length the model would naturally stop at, which reliably
+    produces degenerate/rambling text -- an artifact of ignoring EOS, not a
+    real generation-quality problem. Force the very first generated token to
+    BE eos_token_id and confirm the loop stops there, well short of
+    n_tokens=50."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
+    eos_id = handle._tokenizer.eos_token_id
+    assert eos_id is not None, "fixture model must have a real eos_token_id to force"
+
+    real_forward_logits = forward_logits
+    call_count = {"n": 0}
+
+    def force_eos_on_first_call(handle_arg, input_ids):
+        call_count["n"] += 1
+        logits = real_forward_logits(handle_arg, input_ids)
+        if call_count["n"] == 1:
+            forced = logits.clone()
+            forced[0, -1, :] = float("-inf")
+            forced[0, -1, eos_id] = 0.0
+            return forced
+        return logits
+
+    with patch("personabind.binding.accuracy.forward_logits", side_effect=force_eos_on_first_call):
+        sample_free_completion(handle, ids, seed=1, n_tokens=50)
+    assert call_count["n"] == 1, "generation must stop after the FIRST token once EOS is produced, not continue to n_tokens=50"
+
+
+def test_sample_free_completion_uses_generation_config_sampling_when_present():
+    """If the model's own generation_config specifies do_sample=True (the
+    vendor's own recommended settings, e.g. what Qwen ships in its
+    generation_config.json), sampling must actually be used -- not silently
+    ignored in favour of greedy decoding. Confirmed by spying on
+    torch.multinomial (only called on the sampling path) and by proving the
+    same seed reproduces the same output (seeded, not left to global RNG
+    state, per this project's seed-everything discipline)."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
+
+    class _FakeGenConfig:
+        do_sample = True
+        temperature = 0.7
+        top_p = 0.8
+        top_k = 20
+        eos_token_id = None
+
+    # generation_config must be re-injected before EVERY call, not just once:
+    # nnterp's forward-pass machinery regenerates handle._model.generation_config
+    # fresh from the model's own stored config as a side effect of each forward
+    # pass -- correct, benign behaviour for real usage (a real model's true
+    # vendor settings are picked up fresh every call), but it means an
+    # ARTIFICIALLY INJECTED test config does not survive past the first call
+    # that triggers a forward pass, and must be re-set before each one we want
+    # to actually test.
+    handle._model.generation_config = _FakeGenConfig()
+
+    # Throwaway warm-up call: some backend/JIT setup only settles after the
+    # very first real forward pass through a freshly-loaded handle, which can
+    # make ONLY that first call diverge from later ones despite an identical
+    # seed -- irrelevant in real usage (this field is never scored, and at
+    # most one sample in a multi-thousand-record run would ever be a "first
+    # call"), but would make this specific reproducibility check flaky if we
+    # compared against that literal first call.
+    sample_free_completion(handle, ids, seed=999, n_tokens=1)
+
+    handle._model.generation_config = _FakeGenConfig()
+    with patch("torch.multinomial", wraps=torch.multinomial) as spy:
+        out_a = sample_free_completion(handle, ids, seed=42, n_tokens=5)
+    assert spy.call_count == 5, "do_sample=True must route through multinomial sampling, not argmax"
+
+    handle._model.generation_config = _FakeGenConfig()
+    out_b = sample_free_completion(handle, ids, seed=42, n_tokens=5)
+    assert out_a == out_b, "same seed must reproduce the same sampled completion"
+
+
+def test_sample_free_completion_falls_back_to_greedy_without_a_sampling_config():
+    """A model whose generation_config has no do_sample=True (tiny-gpt2's
+    real config, and most base models) must fall back to plain greedy
+    decoding -- deterministic regardless of seed."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
+    out_a = sample_free_completion(handle, ids, seed=1, n_tokens=5)
+    out_b = sample_free_completion(handle, ids, seed=999, n_tokens=5)
+    assert out_a == out_b, "greedy decoding must be seed-independent"
 
 
 def test_run_accuracy_populates_sample_completion_for_human_inspection():
@@ -83,13 +174,46 @@ def test_run_accuracy_populates_sample_completion_for_human_inspection():
 
 
 def test_run_accuracy_populates_prompt_with_the_exact_text_the_model_saw():
-    """prompt must be the FULL text fed to the model (context + question +
-    answer_prefix, verbatim) -- not a truncated or reconstructed guess."""
+    """prompt must be the FULL text fed to the model -- context + question +
+    the A/B multiple-choice block, verbatim -- not the record's original
+    (unused-for-scoring) answer_prefix, and not a truncated or reconstructed
+    guess. The A/B block's exact letter assignment is randomized per record,
+    so this checks structure (both traits present, ends at 'Answer:') rather
+    than one exact fixed string."""
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     record = _record()
     results = run_accuracy(handle, [record], seed=1)
-    expected = f"{record.context}\n{record.question}\n{record.answer_prefix}"
-    assert results[0].prompt == expected
+    prompt = results[0].prompt
+    assert prompt.startswith(f"{record.context}\n{record.question}\n")
+    assert prompt.endswith("Answer:")
+    assert "A) Doug is expert." in prompt or "A) Doug is novice." in prompt
+    assert "B) Doug is expert." in prompt or "B) Doug is novice." in prompt
+    assert "expert" in prompt and "novice" in prompt
+
+
+def test_mc_answer_prefix_has_no_article_and_ends_at_answer():
+    """No grammatical article on either option -- see _mc_answer_prefix's
+    docstring for why: it would be outright WRONG for T3a/T3b's bare-
+    adjective traits ("is a unreliable"), and grammar no longer sits at the
+    decision point now that the choice is a LETTER, not the trait word
+    itself, so omitting it uniformly is the only choice that's never wrong."""
+    prefix = _mc_answer_prefix("Doug", "expert", "novice")
+    assert prefix == "A) Doug is expert.\nB) Doug is novice.\nAnswer:"
+
+
+def test_own_trait_is_a_is_deterministic_given_the_same_seed():
+    result_1 = _own_trait_is_a(42)
+    result_2 = _own_trait_is_a(42)
+    assert result_1 == result_2
+
+
+def test_own_trait_is_a_actually_varies_across_seeds():
+    """Regression guard against a fake/no-op randomization (e.g. always
+    returning True): across enough seeds, both True and False must occur --
+    otherwise the position-bias control this exists for isn't controlling
+    anything."""
+    outcomes = {_own_trait_is_a(seed) for seed in range(50)}
+    assert outcomes == {True, False}
 
 
 def test_run_accuracy_calls_on_result_once_per_record_for_streaming():
@@ -117,15 +241,13 @@ def test_run_accuracy_produces_one_result_per_record_with_real_fields():
     assert r.predicted in ("expert", "novice")
 
 
-def test_run_accuracy_is_a_genuine_forced_choice_not_first_token_only():
-    """Regression test: run_accuracy must score each candidate via its FULL
-    token sequence, never truncate to a first-token comparison (which would
-    structurally disadvantage a longer candidate). Uses a deliberately
-    multi-token trait as the record's own answer and spies on the actual
-    calls into sequence_logprob to confirm the complete token list -- not a
-    length-1 slice of it -- is what gets scored for both candidates."""
+def test_run_accuracy_scores_a_and_b_as_single_token_candidates():
+    """run_accuracy must compare P("A") vs P("B") (single-token letters, per
+    the multiple-choice framing), never the trait words directly -- this is
+    what sidesteps the multi-token-candidate fairness problem entirely, for
+    free, regardless of how long a trait word is (e.g. T2's tiers)."""
     handle = load_model(TINY_MODEL, dtype=torch.float32)
-    record = _record(answer="quite reliable", other_trait="novice")
+    record = _record(answer="expert", other_trait="novice")
 
     calls = []
     real_sequence_logprob = sequence_logprob
@@ -137,34 +259,51 @@ def test_run_accuracy_is_a_genuine_forced_choice_not_first_token_only():
     with patch("personabind.binding.accuracy.sequence_logprob", side_effect=spy):
         run_accuracy(handle, [record], seed=1)
 
-    quite_reliable_ids = handle._tokenizer(" quite reliable", add_special_tokens=False).input_ids
-    novice_ids = handle._tokenizer(" novice", add_special_tokens=False).input_ids
-    assert len(quite_reliable_ids) >= 2, "fixture must be multi-token to discriminate"
-    assert quite_reliable_ids in calls, "the record's own (multi-token) trait was never scored as a full sequence"
-    assert novice_ids in calls, "the OTHER agent's trait was never scored -- forced choice needs both candidates"
+    a_ids = handle._tokenizer(" A", add_special_tokens=False).input_ids
+    b_ids = handle._tokenizer(" B", add_special_tokens=False).input_ids
+    assert calls == [a_ids, b_ids]
 
 
-def test_run_accuracy_predicted_is_whichever_candidate_has_higher_logprob():
-    """Force each candidate's logprob deterministically (tiny-gpt2's weights
-    are random, so the real ordering can't be predicted analytically) and
-    confirm run_accuracy picks the winner correctly in both directions."""
+def test_run_accuracy_predicted_is_whichever_letter_has_higher_logprob():
+    """Force each letter's logprob deterministically (tiny-gpt2's weights are
+    random, so the real ordering can't be predicted analytically), force the
+    A/B assignment deterministically too (via _own_trait_is_a, not the exact
+    seed-derivation formula), and confirm run_accuracy maps the winning
+    letter back to the correct trait in both directions."""
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     record = _record(answer="expert", other_trait="novice")
+    a_ids = handle._tokenizer(" A", add_special_tokens=False).input_ids
 
-    def fake_logprob(handle_arg, prompt_ids, candidate_ids):
-        expert_ids = handle_arg._tokenizer(" expert", add_special_tokens=False).input_ids
-        return -1.0 if candidate_ids == expert_ids else -5.0
-
-    with patch("personabind.binding.accuracy.sequence_logprob", side_effect=fake_logprob):
+    with (
+        patch("personabind.binding.accuracy._own_trait_is_a", return_value=True),  # A = "expert"
+        patch("personabind.binding.accuracy.sequence_logprob", side_effect=lambda h, p, c: -1.0 if c == a_ids else -5.0),
+    ):
         results = run_accuracy(handle, [record], seed=1)
     assert results[0].predicted == "expert"
     assert results[0].correct is True
 
-    def fake_logprob_reversed(handle_arg, prompt_ids, candidate_ids):
-        expert_ids = handle_arg._tokenizer(" expert", add_special_tokens=False).input_ids
-        return -5.0 if candidate_ids == expert_ids else -1.0
+    with (
+        patch("personabind.binding.accuracy._own_trait_is_a", return_value=True),  # A = "expert" again
+        patch("personabind.binding.accuracy.sequence_logprob", side_effect=lambda h, p, c: -5.0 if c == a_ids else -1.0),
+    ):
+        results = run_accuracy(handle, [record], seed=1)
+    assert results[0].predicted == "novice"
+    assert results[0].correct is False
 
-    with patch("personabind.binding.accuracy.sequence_logprob", side_effect=fake_logprob_reversed):
+
+def test_run_accuracy_maps_the_winning_letter_back_through_the_ab_assignment():
+    """Regression guard for the actual mapping logic: when _own_trait_is_a is
+    False (own trait assigned to B, not A), the SAME 'A wins' outcome must
+    now resolve to the OTHER trait -- i.e. run_accuracy must consult the
+    assignment, not assume A always means 'own'."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record(answer="expert", other_trait="novice")
+    a_ids = handle._tokenizer(" A", add_special_tokens=False).input_ids
+
+    with (
+        patch("personabind.binding.accuracy._own_trait_is_a", return_value=False),  # A = "novice" this time
+        patch("personabind.binding.accuracy.sequence_logprob", side_effect=lambda h, p, c: -1.0 if c == a_ids else -5.0),
+    ):
         results = run_accuracy(handle, [record], seed=1)
     assert results[0].predicted == "novice"
     assert results[0].correct is False

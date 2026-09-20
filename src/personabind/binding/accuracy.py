@@ -1,29 +1,52 @@
 """Test 1: behavioral accuracy -- can the model retrieve the bound trait at
 all, before any mechanistic claim is made about how.
 
-Forced-choice: compares the FULL joint log-probability of each record's two
-present trait values (the query agent's own trait, and the other agent's)
-rather than free generation + string match. Free generation was tried first
-and found, on a real model (Qwen3-4B), to be an unreliable measurement for
-T3a/T3b specifically: the model's correct judgment is often phrased as a
-paraphrase ("not reliable", "that's correct") that a single forced generation
-token, compared against a literal gold word, can neither produce nor
-recognize -- the model wasn't wrong, the measurement was. Forced-choice
-between the two traits ACTUALLY PRESENT in this record's own scenario
-sidesteps free-text vocabulary entirely, and matches the same methodology
-tests 2 and 4 already use for their own on-target measurements.
+Forced-choice, posed as an explicit A/B multiple-choice question -- NOT a raw
+sentence continuation like "{agent} is ___". Two designs were tried before
+this one and both had real problems, found on a real model (Qwen3-4B):
 
-Comparing only each candidate's FIRST token would reintroduce a subtler bias:
-"reliable" and "unreliable" (or T2's multi-word tiers) can tokenize to
-different lengths, and a longer candidate's first subword (e.g. "un") is
-shared by many other words, diluting its probability mass relative to a
-single-token candidate. `_sequence_logprob` scores the whole candidate
-sequence via teacher forcing instead, in one forward pass, so candidates of
-different token lengths are compared fairly.
+1. Free generation + string match: the model's correct judgment is often
+   phrased as a paraphrase ("not reliable", "that's correct") that a literal
+   gold-word match can't recognize -- the model wasn't wrong, the measurement
+   was.
+2. Forced choice directly on the trait words ("{agent} is ___", comparing
+   P("reliable") vs P("unreliable") as the immediate next token): for T3a/T3b
+   specifically, this asks for a verdict BEFORE the model has done the
+   multi-fact verification the task requires (checking each transcript
+   turn's answer against its own knowledge, tallying who was right). Sampled
+   free completions on the same records showed the model reasoning its way
+   to the CORRECT conclusion in prose while the immediate-next-token forced
+   comparison gave the WRONG answer -- a real finding, not noise, and
+   consistent with the "latent multi-hop reasoning" literature (e.g.
+   arXiv:2406.12775): models can compose several facts internally, but the
+   second "hop" (using a recalled fact to reach a conclusion) is fragile
+   without something to lean on between steps.
+
+This design (an explicit "A) ... / B) ... / Answer:" multiple-choice
+question, matching the MC-QA format most instruction-tuned models are
+heavily trained on) still poses a single forced next-token choice, but the
+model has already read BOTH full candidate statements before being asked to
+choose -- much closer to how these models are actually evaluated in
+practice, and closer to what "does the model conclude X" should mean. Which
+letter (A/B) carries the record's own/true trait is RANDOMIZED per record,
+with an explicit seed: LLM multiple-choice evaluation has documented
+position/label bias (a systematic preference for a particular letter,
+independent of content), and this must not silently distort the accuracy
+number in one direction.
+
+Comparing only each candidate's FIRST token would (for the general
+`sequence_logprob` primitive, even though "A"/"B" are themselves always
+single tokens) reintroduce a subtler bias for any future multi-token
+candidate: a longer candidate's first subword can be shared by many other
+words, diluting its probability mass relative to a single-token candidate.
+`sequence_logprob` scores the whole candidate sequence via teacher forcing
+in one forward pass, so candidates of different token lengths are always
+compared fairly, regardless of what's passed to it.
 """
 
 from __future__ import annotations
 
+import random
 import sys
 from collections.abc import Callable
 
@@ -61,19 +84,94 @@ def sequence_logprob(handle: ModelHandle, prompt_ids: torch.Tensor, candidate_id
     return total
 
 
-def sample_free_completion(handle: ModelHandle, prompt_ids: torch.Tensor, n_tokens: int = 100) -> str:
-    """Greedily generate `n_tokens` tokens of free text after `prompt_ids`.
+def sample_free_completion(
+    handle: ModelHandle, prompt_ids: torch.Tensor, seed: int, n_tokens: int = 100,
+) -> str:
+    """Generate up to `n_tokens` tokens of free text after `prompt_ids`, using
+    the model's OWN vendor-shipped generation defaults (do_sample/temperature/
+    top_p/top_k, read from `handle._model.generation_config` -- e.g. the
+    settings Qwen actually ships in its `generation_config.json`) rather than
+    a guessed number, falling back to plain greedy decoding only if the model
+    provides no sampling config at all.
+
+    Stops early at `eos_token_id`: forcing generation to continue well past a
+    model's natural stopping point is a well-known way to produce degenerate,
+    rambling text that looks like "something is wrong with the model" but is
+    actually an artifact of ignoring EOS, not a real generation-quality or
+    parameter problem.
+
     NEVER used for scoring (see this module's docstring for why free
-    generation is unreliable for that) -- purely so a human reading the
-    JSONL can sanity-check the forced-choice verdict against what the model
-    would actually have said if left to talk."""
+    generation is unreliable for that) -- purely for human inspection. Still
+    seeded for reproducibility, per this project's seed-everything
+    discipline, even though it is not itself a scored result."""
+    gen_config = getattr(handle._model, "generation_config", None)
+    do_sample = bool(getattr(gen_config, "do_sample", False))
+    temperature = float(getattr(gen_config, "temperature", None) or 1.0)
+    top_p = float(getattr(gen_config, "top_p", None) or 1.0)
+    top_k = int(getattr(gen_config, "top_k", None) or 0)
+    eos_token_id = getattr(gen_config, "eos_token_id", None)
+    if eos_token_id is None:
+        eos_ids: set[int] = set()
+    elif isinstance(eos_token_id, (list, tuple)):
+        eos_ids = set(eos_token_id)
+    else:
+        eos_ids = {eos_token_id}
+
+    rng = torch.Generator().manual_seed(seed)
     ids = prompt_ids.clone()
     for _ in range(n_tokens):
-        logits = forward_logits(handle, ids)
-        next_id = logits[0, -1].argmax().item()
+        logits = forward_logits(handle, ids)[0, -1].clone()
+        if do_sample:
+            logits = logits / max(temperature, 1e-5)
+            if top_k > 0:
+                k = min(top_k, logits.shape[-1])
+                threshold = torch.topk(logits, k).values[-1]
+                logits[logits < threshold] = float("-inf")
+            if top_p < 1.0:
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+                probs = torch.softmax(sorted_logits, dim=-1)
+                cumulative = torch.cumsum(probs, dim=-1)
+                remove = cumulative > top_p
+                remove[1:] = remove[:-1].clone()
+                remove[0] = False
+                sorted_logits[remove] = float("-inf")
+                logits = torch.full_like(logits, float("-inf"))
+                logits[sorted_idx] = sorted_logits
+            probs = torch.softmax(logits, dim=-1)
+            next_id = int(torch.multinomial(probs, 1, generator=rng).item())
+        else:
+            next_id = int(logits.argmax().item())
         ids = torch.cat([ids, torch.tensor([[next_id]])], dim=1)
+        if next_id in eos_ids:
+            break
     new_ids = ids[0, prompt_ids.shape[1]:].tolist()
     return handle._tokenizer.decode(new_ids).strip()
+
+
+def _own_trait_is_a(seed_i: int) -> bool:
+    """Randomize which letter (A/B) carries the record's own/true trait,
+    seeded for reproducibility -- controls for LLM multiple-choice
+    evaluation's documented position/label bias (a systematic model
+    preference for a particular letter, independent of content), rather than
+    silently letting it distort the accuracy number in one direction.
+    Extracted as its own function so tests can force a specific assignment
+    without depending on the exact seed-derivation formula in `run_accuracy`."""
+    return random.Random(seed_i).random() < 0.5
+
+
+def _mc_answer_prefix(query_agent: str, trait_for_a: str, trait_for_b: str) -> str:
+    """The 'A) .../B) .../Answer:' block, used as this record's MEASUREMENT-
+    time answer_prefix (via the same frozen-dataclass reconstruction pattern
+    used elsewhere in this codebase for measurement-only prompt changes,
+    e.g. `measurement_answer_prefix` in factorizability.py/mean_intervention.py).
+    No grammatical article ("a"/"an") on either option: T1/T2's trait words
+    need one to read naturally (an expert / a novice) but T3a/T3b's don't
+    (reliable / unreliable are bare adjectives here, not nouns) -- since the
+    forced choice is now between letters, not the trait words themselves,
+    grammar here is purely cosmetic, and omitting the article uniformly
+    avoids ever being outright WRONG (e.g. "is a unreliable") for the
+    variants that don't want one."""
+    return f"A) {query_agent} is {trait_for_a}.\nB) {query_agent} is {trait_for_b}.\nAnswer:"
 
 
 def run_accuracy(
@@ -84,19 +182,29 @@ def run_accuracy(
     as it's computed -- e.g. to stream it to disk (see
     `personabind.binding.results.append_jsonl`) rather than waiting for the
     whole (potentially very long) call to finish before anything is written."""
-    results = []
-    for record in tqdm(records, desc="accuracy", unit="record", file=sys.stdout):
-        tokenized = tokenize_record(record, handle._tokenizer)
-        prompt_ids = torch.tensor([tokenized.input_ids[: answer_position(tokenized) + 1]])
+    a_ids = _token_ids_for(handle, "A")
+    b_ids = _token_ids_for(handle, "B")
 
+    results = []
+    for idx, record in enumerate(tqdm(records, desc="accuracy", unit="record", file=sys.stdout)):
         other_agent = next(a.name for a in record.agents if a.name != record.query_agent)
         other_trait = trait_of(record, other_agent)
 
-        own_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, record.answer))
-        other_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, other_trait))
-        sample = sample_free_completion(handle, prompt_ids)
+        own_is_a = _own_trait_is_a(seed + idx)
+        trait_for_a = record.answer if own_is_a else other_trait
+        trait_for_b = other_trait if own_is_a else record.answer
 
-        predicted = record.answer if own_logprob > other_logprob else other_trait
+        mc_record = record.__class__(
+            **{**record.__dict__, "answer_prefix": _mc_answer_prefix(record.query_agent, trait_for_a, trait_for_b)}
+        )
+        tokenized = tokenize_record(mc_record, handle._tokenizer)
+        prompt_ids = torch.tensor([tokenized.input_ids[: answer_position(tokenized) + 1]])
+
+        a_logprob = sequence_logprob(handle, prompt_ids, a_ids)
+        b_logprob = sequence_logprob(handle, prompt_ids, b_ids)
+        sample = sample_free_completion(handle, prompt_ids, seed=seed + idx)
+
+        predicted = trait_for_a if a_logprob > b_logprob else trait_for_b
         result = AccuracyResult(
             model=handle.model_id, variant=record.variant, record_id=record.id,
             predicted=predicted, gold=record.answer, correct=predicted == record.answer, seed=seed,
