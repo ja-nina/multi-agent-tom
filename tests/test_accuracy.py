@@ -82,6 +82,16 @@ def test_run_accuracy_populates_sample_completion_for_human_inspection():
     assert results[0].predicted in ("expert", "novice")  # unaffected by whatever the free sample says
 
 
+def test_run_accuracy_populates_prompt_with_the_exact_text_the_model_saw():
+    """prompt must be the FULL text fed to the model (context + question +
+    answer_prefix, verbatim) -- not a truncated or reconstructed guess."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    record = _record()
+    results = run_accuracy(handle, [record], seed=1)
+    expected = f"{record.context}\n{record.question}\n{record.answer_prefix}"
+    assert results[0].prompt == expected
+
+
 def test_run_accuracy_produces_one_result_per_record_with_real_fields():
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     results = run_accuracy(handle, [_record()], seed=1)

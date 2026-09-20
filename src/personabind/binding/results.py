@@ -22,6 +22,10 @@ class AccuracyResult:
     # sanity-check the forced-choice verdict above against what the model
     # would actually have said unprompted.
     sample_completion: str = ""
+    # The exact text fed to the model (context + question + answer_prefix,
+    # verbatim) -- lets a human see exactly what the model saw when judging
+    # whether `predicted`/`sample_completion` make sense.
+    prompt: str = ""
 
 
 @dataclass(frozen=True)

@@ -92,7 +92,7 @@ def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[
         results.append(AccuracyResult(
             model=handle.model_id, variant=record.variant, record_id=record.id,
             predicted=predicted, gold=record.answer, correct=predicted == record.answer, seed=seed,
-            sample_completion=sample,
+            sample_completion=sample, prompt=tokenized.text,
         ))
     return results
 
