@@ -7,8 +7,11 @@ follow.
 
 from __future__ import annotations
 
+import sys
+
 import torch
 from scipy.stats import beta
+from tqdm import tqdm
 
 from personabind.binding.positions import answer_position, tokenize_record
 from personabind.binding.results import AccuracyResult
@@ -42,7 +45,7 @@ def _normalize_for_comparison(text: str) -> str:
 
 def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[AccuracyResult]:
     results = []
-    for record in records:
+    for record in tqdm(records, desc="accuracy", unit="record", file=sys.stdout):
         tokenized = tokenize_record(record, handle._tokenizer)
         # Tokenize WITH a leading space: `answer_prefix` never ends in one, so
         # the model's real in-context completion is however this tokenizer

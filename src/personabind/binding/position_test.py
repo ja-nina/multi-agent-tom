@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 import torch
+from tqdm import tqdm
 
 from personabind.binding.positions import stored_position, tokenize_record
 from personabind.binding.results import PositionGeneralizationResult
@@ -98,7 +101,10 @@ def run_position_test(
                 "direction. Increase train_fraction or sample size."
             )
 
-        for layer in layers:
+        layer_bar = tqdm(
+            layers, desc=f"position_test: fit_position={fit_position}", unit="layer", file=sys.stdout,
+        )
+        for layer in layer_bar:
             train_acts = [_read_activation(handle, r, layer) for r in train_recs]
             train_high = [a for r, a in zip(train_recs, train_acts) if r.answer == high_trait]
             train_low = [a for r, a in zip(train_recs, train_acts) if r.answer == low_trait]

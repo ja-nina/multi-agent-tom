@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 import torch
+from tqdm import tqdm
 
 from personabind.binding.position_test import _fit_diff_means, _read_activation, _split_train_test
 from personabind.binding.positions import (
@@ -48,7 +51,7 @@ def run_mean_intervention(
             "cannot fit a difference-in-means direction. Increase train_fraction or sample size."
         )
 
-    for layer in layers:
+    for layer in tqdm(layers, desc="mean_intervention: layers", unit="layer", file=sys.stdout):
         train_acts = [_read_activation(handle, r, layer) for r in train_recs]
         train_high = [a for r, a in zip(train_recs, train_acts) if r.answer == high_trait]
         train_low = [a for r, a in zip(train_recs, train_acts) if r.answer == low_trait]

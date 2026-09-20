@@ -9,7 +9,10 @@ a re-rendered question asked about the OTHER agent.
 
 from __future__ import annotations
 
+import sys
+
 import torch
+from tqdm import tqdm
 
 from personabind.binding.positions import (
     answer_position,
@@ -52,7 +55,11 @@ def run_factorizability(
     handle: ModelHandle, record_pairs: list, layers: list[int], seed: int, config_hash: str,
 ) -> list[InterventionResult]:
     results: list[InterventionResult] = []
-    for pair_idx, (base, twin) in enumerate(record_pairs):
+    pairs_with_index = tqdm(
+        enumerate(record_pairs), total=len(record_pairs),
+        desc="factorizability: pairs", unit="pair", file=sys.stdout,
+    )
+    for pair_idx, (base, twin) in pairs_with_index:
         base_tok = tokenize_record(base, handle._tokenizer)  # for POSITION resolution only, below
         twin_tok = tokenize_record(twin, handle._tokenizer)
         twin_ids = torch.tensor([twin_tok.input_ids])

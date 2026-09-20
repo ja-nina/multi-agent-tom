@@ -89,8 +89,10 @@ def write_verdict(model_id: str, output_dir: str, verdict_key: str, per_variant:
 
 def run_battery(model_id: str, config: dict) -> dict:
     import random
+    import sys
 
     import torch
+    from tqdm import tqdm
 
     from personabind.binding.accuracy import aggregate_accuracy, run_accuracy
     from personabind.binding.factorizability import run_factorizability
@@ -133,7 +135,9 @@ def run_battery(model_id: str, config: dict) -> dict:
         "t3b_inferred_llm": (T3_LABELS[1], T3_LABELS[0]),
     }
 
-    for variant in config["variants"]:
+    variant_bar = tqdm(config["variants"], desc="binding battery: variants", unit="variant", file=sys.stdout)
+    for variant in variant_bar:
+        variant_bar.set_postfix_str(variant)
         path = os.path.join(config["dataset_dir"], f"{variant}.jsonl")
         with open(path, encoding="utf-8") as fh:
             all_records = [from_jsonl_line(line) for line in fh if line.strip()]
