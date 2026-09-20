@@ -60,7 +60,7 @@ def sequence_logprob(handle: ModelHandle, prompt_ids: torch.Tensor, candidate_id
     return total
 
 
-def sample_free_completion(handle: ModelHandle, prompt_ids: torch.Tensor, n_tokens: int = 8) -> str:
+def sample_free_completion(handle: ModelHandle, prompt_ids: torch.Tensor, n_tokens: int = 100) -> str:
     """Greedily generate `n_tokens` tokens of free text after `prompt_ids`.
     NEVER used for scoring (see this module's docstring for why free
     generation is unreliable for that) -- purely so a human reading the
