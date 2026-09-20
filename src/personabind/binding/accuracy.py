@@ -85,7 +85,7 @@ def sequence_logprob(handle: ModelHandle, prompt_ids: torch.Tensor, candidate_id
 
 
 def sample_free_completion(
-    handle: ModelHandle, prompt_ids: torch.Tensor, seed: int, n_tokens: int = 100,
+    handle: ModelHandle, prompt_ids: torch.Tensor, seed: int, n_tokens: int = 50,
 ) -> str:
     """Generate up to `n_tokens` tokens of free text after `prompt_ids`, using
     the model's OWN vendor-shipped generation defaults (do_sample/temperature/
@@ -159,6 +159,28 @@ def _own_trait_is_a(seed_i: int) -> bool:
     return random.Random(seed_i).random() < 0.5
 
 
+def _transcript_framed_question(record: Record) -> str:
+    """For transcript-based variants (T3a/T3b -- detected via `record.turns`
+    being populated; T1/T2 never set it), prefix the real question with a
+    framing sentence naming both participants and stating the task
+    explicitly, e.g. "Given this excerpt from the conversation between Doug
+    and Charles, determine how reliable each participant is." T1/T2 state
+    the trait directly in one sentence -- there's no "conversation excerpt"
+    to frame there, so this only applies where a multi-turn transcript
+    actually precedes the question. Uses whichever names the record's own
+    agents actually have (literal "Agent A"/"Agent B" for some records, real
+    names for others) -- never hardcoded."""
+    if not record.turns:
+        return record.question
+    names = [a.name for a in record.agents]
+    if len(names) != 2:
+        return record.question
+    return (
+        f"Given this excerpt from the conversation between {names[0]} and {names[1]}, "
+        f"determine how reliable each participant is.\n{record.question}"
+    )
+
+
 def _mc_answer_prefix(query_agent: str, trait_for_a: str, trait_for_b: str) -> str:
     """The 'A) .../B) .../Answer:' block, used as this record's MEASUREMENT-
     time answer_prefix (via the same frozen-dataclass reconstruction pattern
@@ -195,7 +217,11 @@ def run_accuracy(
         trait_for_b = other_trait if own_is_a else record.answer
 
         mc_record = record.__class__(
-            **{**record.__dict__, "answer_prefix": _mc_answer_prefix(record.query_agent, trait_for_a, trait_for_b)}
+            **{
+                **record.__dict__,
+                "question": _transcript_framed_question(record),
+                "answer_prefix": _mc_answer_prefix(record.query_agent, trait_for_a, trait_for_b),
+            }
         )
         tokenized = tokenize_record(mc_record, handle._tokenizer)
         prompt_ids = torch.tensor([tokenized.input_ids[: answer_position(tokenized) + 1]])

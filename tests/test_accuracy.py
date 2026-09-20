@@ -6,6 +6,7 @@ import torch
 from personabind.binding.accuracy import (
     _mc_answer_prefix,
     _own_trait_is_a,
+    _transcript_framed_question,
     aggregate_accuracy,
     clopper_pearson_ci,
     run_accuracy,
@@ -14,7 +15,7 @@ from personabind.binding.accuracy import (
 )
 from personabind.binding.results import AccuracyResult
 from personabind.common.activations import forward_logits, load_model
-from personabind.record import AgentSpec, Record
+from personabind.record import AgentSpec, Record, Turn
 
 TINY_MODEL = "sshleifer/tiny-gpt2"
 
@@ -27,6 +28,23 @@ def _record(answer="expert", other_trait="novice"):
         agents=[AgentSpec("Doug", 0, answer, 1), AgentSpec("Charles", 1, other_trait, 0)],
         query_agent="Doug", answer=answer,
         counterfactual_id="t1_2", counterfactual_diff="agent_trait_map", seed=1,
+    )
+
+
+def _transcript_record(answer="reliable", other_trait="unreliable"):
+    turns = [
+        Turn("q1", "Q1?", "gold1", "wrong1", {"Doug": {"text": "answer1"}, "Charles": {"text": "answer1b"}}),
+        Turn("q2", "Q2?", "gold2", "wrong2", {"Doug": {"text": "answer2"}, "Charles": {"text": "answer2b"}}),
+    ]
+    context = "Q1: Q1?\nDoug: answer1\nCharles: answer1b\n\nQ2: Q2?\nDoug: answer2\nCharles: answer2b"
+    return Record(
+        id="t3a_1", variant="t3a_inferred_templated", format="n/a", domain="history",
+        name_style="personal", context=context,
+        question="How reliable is Doug?", answer_prefix="Doug is",
+        agents=[AgentSpec("Doug", 0, answer, 1 if answer == "reliable" else 0),
+                AgentSpec("Charles", 1, other_trait, 0 if answer == "reliable" else 1)],
+        query_agent="Doug", answer=answer,
+        counterfactual_id="t3a_2", counterfactual_diff="agent_correctness_map", seed=1, turns=turns,
     )
 
 
@@ -199,6 +217,38 @@ def test_mc_answer_prefix_has_no_article_and_ends_at_answer():
     itself, so omitting it uniformly is the only choice that's never wrong."""
     prefix = _mc_answer_prefix("Doug", "expert", "novice")
     assert prefix == "A) Doug is expert.\nB) Doug is novice.\nAnswer:"
+
+
+def test_transcript_framed_question_prefixes_transcript_variants_only():
+    """T1/T2 state the trait directly -- there's no 'conversation excerpt' to
+    frame, so the question must pass through unchanged (record.turns is None
+    for both). T3a/T3b's question gets the framing sentence prepended, using
+    whichever names the record's own agents actually have."""
+    plain = _record()
+    assert _transcript_framed_question(plain) == plain.question
+
+    transcript = _transcript_record()
+    framed = _transcript_framed_question(transcript)
+    assert framed == (
+        "Given this excerpt from the conversation between Doug and Charles, "
+        "determine how reliable each participant is.\nHow reliable is Doug?"
+    )
+
+
+def test_run_accuracy_prompt_includes_framing_for_transcripts_not_for_stated_traits():
+    """End-to-end: the ACTUAL prompt scored/logged for a transcript-based
+    record must contain the framing sentence; a stated-trait record's prompt
+    must not."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+
+    plain_result = run_accuracy(handle, [_record()], seed=1)[0]
+    assert "Given this excerpt from the conversation" not in plain_result.prompt
+
+    transcript_result = run_accuracy(handle, [_transcript_record()], seed=1)[0]
+    assert "Given this excerpt from the conversation between Doug and Charles" in transcript_result.prompt
+    # the framing must come BEFORE the actual question, and the question
+    # itself must still be present, unmodified, right after it.
+    assert "determine how reliable each participant is.\nHow reliable is Doug?" in transcript_result.prompt
 
 
 def test_own_trait_is_a_is_deterministic_given_the_same_seed():
