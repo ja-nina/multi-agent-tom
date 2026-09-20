@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 import torch
 from tqdm import tqdm
@@ -30,7 +31,12 @@ def _logprob_of_token(logits: torch.Tensor, token_id: int) -> float:
 def run_mean_intervention(
     handle: ModelHandle, records: list, trait_contrast: tuple[str, str], layers: list[int],
     coefficients: list[float], train_fraction: float, seed: int, config_hash: str,
+    on_result: Callable[[InterventionResult], None] | None = None,
 ) -> list[InterventionResult]:
+    """`on_result`, if given, is called with each `InterventionResult`
+    immediately as it's computed -- e.g. to stream it to disk rather than
+    waiting for this (potentially very long: layers x records x
+    coefficients) call to finish before anything is written."""
     high_trait, low_trait = trait_contrast
     results: list[InterventionResult] = []
 
@@ -114,7 +120,7 @@ def run_mean_intervention(
                     _logprob_of_token(other_patched_logits, other_target_token_id) - other_clean_logprob
                 )
 
-                results.append(InterventionResult(
+                result = InterventionResult(
                     test="mean_intervention", record_id=record.id, model=handle.model_id,
                     variant=record.variant, layer=layer,
                     layer_type=handle.layer_types[layer] if handle.layer_types else "full_attention",
@@ -124,5 +130,8 @@ def run_mean_intervention(
                     effect_off_target=effect_off_target, coefficient=coefficient,
                     direction_norm_fraction=direction_norm_fraction, train_test_split="test",
                     seed=seed_i, config_hash=config_hash,
-                ))
+                )
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
     return results

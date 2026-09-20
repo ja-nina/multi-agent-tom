@@ -37,6 +37,16 @@ def test_run_factorizability_produces_both_patch_sites_per_layer():
     assert sites == {"stored", "retrieved"}
 
 
+def test_run_factorizability_calls_on_result_once_per_row_for_streaming():
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    streamed = []
+    results = run_factorizability(
+        handle, [_pair()], layers=[0, 1], seed=1, config_hash="abc", on_result=streamed.append
+    )
+    assert streamed == results
+    assert len(streamed) == len(results) > 0
+
+
 def test_stored_site_has_off_target_retrieved_site_does_not():
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     results = run_factorizability(handle, [_pair()], layers=[0], seed=1, config_hash="abc")

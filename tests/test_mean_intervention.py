@@ -40,6 +40,19 @@ def test_run_mean_intervention_sweeps_coefficients_and_carries_baseline():
         assert r.direction_norm_fraction is not None
 
 
+def test_run_mean_intervention_calls_on_result_once_per_row_for_streaming():
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    records = [_record(i, i % 2) for i in range(20)]
+    streamed = []
+    results = run_mean_intervention(
+        handle, records, trait_contrast=("expert", "novice"), layers=[0],
+        coefficients=[0.5, 1.0], train_fraction=0.5, seed=1, config_hash="abc",
+        on_result=streamed.append,
+    )
+    assert streamed == results
+    assert len(streamed) == len(results) > 0
+
+
 # NOTE: `test_train_and_test_splits_never_mix_a_pair` used to live here. Its
 # only assertion (`len(tested_ids) <= len(records)`) is true by construction
 # for any implementation, so it could not fail. The real pair-disjointness

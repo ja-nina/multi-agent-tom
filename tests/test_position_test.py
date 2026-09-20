@@ -75,6 +75,25 @@ def test_run_position_test_reports_shuffled_control():
         assert r.position_invariance_ratio >= 0.0 or math.isnan(r.position_invariance_ratio)
 
 
+def test_run_position_test_calls_on_result_once_per_row_for_streaming():
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    records: list[Record] = []
+    for i, p in enumerate([0, 1] * 10):
+        high = _record(position=p, level=1, name_a=f"A{i}", name_b=f"B{i}")
+        low = _record(position=p, level=0, name_a=f"A{i}", name_b=f"B{i}")
+        high = dataclasses.replace(high, counterfactual_id=low.id)
+        low = dataclasses.replace(low, counterfactual_id=high.id)
+        records.append(high)
+        records.append(low)
+    streamed = []
+    results = run_position_test(
+        handle, records, trait_contrast=("expert", "novice"), layers=[0],
+        train_fraction=0.5, seed=1, config_hash="abc", on_result=streamed.append,
+    )
+    assert streamed == results
+    assert len(streamed) == 2
+
+
 def _paired_records(n_pairs: int) -> list[Record]:
     """Build `n_pairs` genuine base/twin pairs: each pair shares a position,
     has opposite answers (one 'expert', one 'novice'), and cross-references

@@ -92,6 +92,18 @@ def test_run_accuracy_populates_prompt_with_the_exact_text_the_model_saw():
     assert results[0].prompt == expected
 
 
+def test_run_accuracy_calls_on_result_once_per_record_for_streaming():
+    """on_result must fire once per record, with the SAME object that ends up
+    in the returned list -- this is what lets a caller stream each result to
+    disk as it's computed instead of waiting for the whole call to finish."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    records = [_record(answer="expert"), _record(answer="novice", other_trait="expert")]
+    streamed = []
+    results = run_accuracy(handle, records, seed=1, on_result=streamed.append)
+    assert streamed == results
+    assert len(streamed) == 2
+
+
 def test_run_accuracy_produces_one_result_per_record_with_real_fields():
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     results = run_accuracy(handle, [_record()], seed=1)

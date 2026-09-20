@@ -76,3 +76,15 @@ def write_jsonl(results: list, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.writelines(json.dumps(asdict(r), ensure_ascii=False) + "\n" for r in results)
+
+
+def append_jsonl(result, fh) -> None:
+    """Append ONE result as a single JSONL line to an ALREADY-OPEN file
+    handle, flushing immediately so the write is visible right away to
+    anything reading the file concurrently (e.g. `tail -f` on a live cluster
+    job's output). This is the streaming counterpart to `write_jsonl`: the
+    battery calls this once per result, as each one is computed, instead of
+    accumulating a whole test's results in memory and writing them all in
+    one batch at the very end."""
+    fh.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+    fh.flush()

@@ -10,6 +10,7 @@ a re-rendered question asked about the OTHER agent.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 import torch
 from tqdm import tqdm
@@ -53,7 +54,12 @@ def _measure(
 
 def run_factorizability(
     handle: ModelHandle, record_pairs: list, layers: list[int], seed: int, config_hash: str,
+    on_result: Callable[[InterventionResult], None] | None = None,
 ) -> list[InterventionResult]:
+    """`on_result`, if given, is called with each `InterventionResult`
+    immediately as it's computed -- e.g. to stream it to disk rather than
+    waiting for this (potentially very long: pairs x layers x 2 sites) call
+    to finish before anything is written."""
     results: list[InterventionResult] = []
     pairs_with_index = tqdm(
         enumerate(record_pairs), total=len(record_pairs),
@@ -121,7 +127,7 @@ def run_factorizability(
                     )
                     read_off_target = answer_position(other_base_tok)
 
-                results.append(InterventionResult(
+                result = InterventionResult(
                     test="factorizability", record_id=base.id, model=handle.model_id,
                     variant=base.variant, layer=layer,
                     layer_type=handle.layer_types[layer] if handle.layer_types else "full_attention",
@@ -130,5 +136,8 @@ def run_factorizability(
                     effect_on_target=effect_on_target, effect_norm_matched_random=effect_baseline,
                     effect_off_target=effect_off_target, coefficient=1.0, direction_norm_fraction=None,
                     train_test_split="n/a", seed=seed_i, config_hash=config_hash,
-                ))
+                )
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
     return results

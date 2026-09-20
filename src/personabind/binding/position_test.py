@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 import torch
 from tqdm import tqdm
@@ -74,7 +75,13 @@ def _accuracy(records, activations, direction, midpoint, high_trait, low_trait) 
 def run_position_test(
     handle: ModelHandle, records: list, trait_contrast: tuple[str, str], layers: list[int],
     train_fraction: float, seed: int, config_hash: str,
+    on_result: Callable[[PositionGeneralizationResult], None] | None = None,
 ) -> list[PositionGeneralizationResult]:
+    """`on_result`, if given, is called with each `PositionGeneralizationResult`
+    immediately as it's computed -- e.g. to stream it to disk. This also means
+    a raise for the SECOND fit_position (a degenerate train fold) no longer
+    discards the first fit_position's already-computed, perfectly valid
+    results: they were already streamed out before the exception happened."""
     high_trait, low_trait = trait_contrast
     contrast_label = f"{high_trait}_vs_{low_trait}"
     pos0 = [r for r in records if r.agents[[a.name for a in r.agents].index(r.query_agent)].position == 0]
@@ -129,7 +136,7 @@ def run_position_test(
                 test_recs_same, same_acts, shuf_direction, shuf_midpoint, high_trait, low_trait
             )
 
-            results.append(PositionGeneralizationResult(
+            result = PositionGeneralizationResult(
                 model=handle.model_id, variant=records[0].variant if records else "", layer=layer,
                 trait_contrast=contrast_label, fit_position=fit_position,
                 same_position_accuracy=same_acc, cross_position_accuracy=cross_acc,
@@ -141,5 +148,8 @@ def run_position_test(
                 shuffled_label_control_accuracy=shuffled_control_acc,
                 n_train=len(train_recs), n_test=n_same_filtered,
                 seed=seed + fit_position * 1000 + layer, config_hash=config_hash,
-            ))
+            )
+            results.append(result)
+            if on_result is not None:
+                on_result(result)
     return results

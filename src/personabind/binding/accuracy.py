@@ -25,6 +25,7 @@ different token lengths are compared fairly.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 import torch
 from scipy.stats import beta
@@ -75,7 +76,14 @@ def sample_free_completion(handle: ModelHandle, prompt_ids: torch.Tensor, n_toke
     return handle._tokenizer.decode(new_ids).strip()
 
 
-def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[AccuracyResult]:
+def run_accuracy(
+    handle: ModelHandle, records: list[Record], seed: int,
+    on_result: Callable[[AccuracyResult], None] | None = None,
+) -> list[AccuracyResult]:
+    """`on_result`, if given, is called with each `AccuracyResult` immediately
+    as it's computed -- e.g. to stream it to disk (see
+    `personabind.binding.results.append_jsonl`) rather than waiting for the
+    whole (potentially very long) call to finish before anything is written."""
     results = []
     for record in tqdm(records, desc="accuracy", unit="record", file=sys.stdout):
         tokenized = tokenize_record(record, handle._tokenizer)
@@ -89,11 +97,14 @@ def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[
         sample = sample_free_completion(handle, prompt_ids)
 
         predicted = record.answer if own_logprob > other_logprob else other_trait
-        results.append(AccuracyResult(
+        result = AccuracyResult(
             model=handle.model_id, variant=record.variant, record_id=record.id,
             predicted=predicted, gold=record.answer, correct=predicted == record.answer, seed=seed,
             sample_completion=sample, prompt=tokenized.text,
-        ))
+        )
+        results.append(result)
+        if on_result is not None:
+            on_result(result)
     return results
 
 

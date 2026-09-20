@@ -97,7 +97,7 @@ def run_battery(model_id: str, config: dict) -> dict:
     from personabind.binding.accuracy import aggregate_accuracy, run_accuracy
     from personabind.binding.factorizability import run_factorizability
     from personabind.binding.report import aggregate_intervention_results
-    from personabind.binding.results import write_jsonl
+    from personabind.binding.results import append_jsonl
     from personabind.common.activations import load_model, verify_tooling
     from personabind.generator.traits import T1_TRAITS, T2_TIERS, T3_LABELS
     from personabind.record import from_jsonl_line
@@ -162,9 +162,16 @@ def run_battery(model_id: str, config: dict) -> dict:
             if twin is not None:
                 sampled_records.append(twin)
 
-        accuracy_results = run_accuracy(handle, sampled_records, seed)
+        # Every test's results are STREAMED to disk one row at a time as they're
+        # computed (via on_result=append_jsonl), not accumulated in memory and
+        # written in one batch at the end -- so a partial result survives a
+        # crash/timeout partway through a long test, and the file's growth can
+        # be watched live (e.g. `tail -f`) instead of only appearing all at once
+        # when the whole test finally finishes.
+        accuracy_path = os.path.join(output_dir, f"{model_id.replace('/', '_')}__{variant}__accuracy.jsonl")
+        with open(accuracy_path, "a", encoding="utf-8") as fh:
+            accuracy_results = run_accuracy(handle, sampled_records, seed, on_result=lambda r: append_jsonl(r, fh))
         acc_summary = aggregate_accuracy(accuracy_results)
-        write_jsonl(accuracy_results, os.path.join(output_dir, f"{model_id.replace('/', '_')}__{variant}__accuracy.jsonl"))
 
         causal_effects_by_layer: dict[int, tuple[float, float]] = {}
         if acc_summary["accuracy"] >= config["accuracy_floor"]:
@@ -173,25 +180,39 @@ def run_battery(model_id: str, config: dict) -> dict:
                 twin = by_id.get(base.counterfactual_id)
                 if twin is not None:
                     pairs.append((base, twin))
-            factorizability_results = run_factorizability(handle, pairs, layers, seed, config_hash=config_hash)
-            write_jsonl(factorizability_results, os.path.join(output_dir, f"{model_id.replace('/', '_')}__{variant}__factorizability.jsonl"))
+            factorizability_path = os.path.join(
+                output_dir, f"{model_id.replace('/', '_')}__{variant}__factorizability.jsonl"
+            )
+            with open(factorizability_path, "a", encoding="utf-8") as fh:
+                factorizability_results = run_factorizability(
+                    handle, pairs, layers, seed, config_hash=config_hash, on_result=lambda r: append_jsonl(r, fh)
+                )
 
             stored_only = [r for r in factorizability_results if r.patch_site == "stored"]
             causal_effects_by_layer = aggregate_intervention_results(stored_only)
 
             trait_contrast = trait_contrast_by_variant.get(variant)
             if trait_contrast is not None:
-                position_results = run_position_test_safe(
-                    handle, sampled_records, trait_contrast, layers, config["train_fraction"], seed, config_hash,
+                position_test_path = os.path.join(
+                    output_dir, f"{model_id.replace('/', '_')}__{variant}__position_test.jsonl"
                 )
-                if position_results:
-                    write_jsonl(position_results, os.path.join(output_dir, f"{model_id.replace('/', '_')}__{variant}__position_test.jsonl"))
-                mean_intervention_results = run_mean_intervention_safe(
-                    handle, sampled_records, trait_contrast, layers, config["mean_intervention_coefficients"],
-                    config["train_fraction"], seed, config_hash,
+                with open(position_test_path, "a", encoding="utf-8") as fh:
+                    # Return value intentionally unused: nothing downstream
+                    # aggregates test 3's own results into the gate, and every
+                    # row it produces was already streamed to disk above.
+                    run_position_test_safe(
+                        handle, sampled_records, trait_contrast, layers, config["train_fraction"], seed, config_hash,
+                        on_result=lambda r: append_jsonl(r, fh),
+                    )
+                mean_intervention_path = os.path.join(
+                    output_dir, f"{model_id.replace('/', '_')}__{variant}__mean_intervention.jsonl"
                 )
+                with open(mean_intervention_path, "a", encoding="utf-8") as fh:
+                    mean_intervention_results = run_mean_intervention_safe(
+                        handle, sampled_records, trait_contrast, layers, config["mean_intervention_coefficients"],
+                        config["train_fraction"], seed, config_hash, on_result=lambda r: append_jsonl(r, fh),
+                    )
                 if mean_intervention_results:
-                    write_jsonl(mean_intervention_results, os.path.join(output_dir, f"{model_id.replace('/', '_')}__{variant}__mean_intervention.jsonl"))
                     # Mean-intervention emits one row per record PER COEFFICIENT, so
                     # grouping by layer alone would pool the same record's repeated
                     # measurements as if they were independent (inflating n, shrinking
@@ -223,15 +244,21 @@ def run_battery(model_id: str, config: dict) -> dict:
     return {"verdict": verdict_key, "per_variant": per_variant, "verdict_path": verdict_path}
 
 
-def run_position_test_safe(handle, records, trait_contrast, layers, train_fraction, seed, config_hash):
+def run_position_test_safe(handle, records, trait_contrast, layers, train_fraction, seed, config_hash, on_result=None):
     import warnings
 
     from personabind.binding.position_test import run_position_test
     try:
-        return run_position_test(handle, records, trait_contrast, layers, train_fraction, seed, config_hash)
+        return run_position_test(
+            handle, records, trait_contrast, layers, train_fraction, seed, config_hash, on_result=on_result
+        )
     except ValueError as exc:
         # Never swallow silently: a skipped test is a hole in the verdict's evidence,
-        # not a pass, and the caller must be able to see why it was skipped.
+        # not a pass, and the caller must be able to see why it was skipped. Any
+        # results from a fit_position that completed before the raise were
+        # already streamed to disk via on_result -- they are NOT lost, even
+        # though this function still returns [] (matching its existing
+        # "produced nothing usable" contract for the caller's aggregation step).
         warnings.warn(
             f"run_position_test skipped (test 3 will contribute nothing to the verdict): {exc}",
             stacklevel=2,
@@ -239,12 +266,17 @@ def run_position_test_safe(handle, records, trait_contrast, layers, train_fracti
         return []
 
 
-def run_mean_intervention_safe(handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash):
+def run_mean_intervention_safe(
+    handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash, on_result=None,
+):
     import warnings
 
     from personabind.binding.mean_intervention import run_mean_intervention
     try:
-        return run_mean_intervention(handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash)
+        return run_mean_intervention(
+            handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash,
+            on_result=on_result,
+        )
     except ValueError as exc:
         warnings.warn(
             f"run_mean_intervention skipped (test 4 will contribute nothing to the verdict): {exc}",

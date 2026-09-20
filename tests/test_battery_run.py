@@ -249,6 +249,11 @@ def test_run_battery_exercises_causal_tests_when_accuracy_gate_is_trivially_pass
     with open(factorizability_path, encoding="utf-8") as fh:
         lines = [line for line in fh if line.strip()]
     assert len(lines) > 0, "factorizability produced no output rows"
+    # Results now STREAM to disk one row at a time as they're computed, rather
+    # than accumulating in memory and being written once at the end -- exact
+    # count (3 pairs x 1 layer x 2 patch sites = 6), not just ">0", guards
+    # against accidentally double-writing every row.
+    assert len(lines) == 6
 
 
 def test_run_battery_runs_position_test_and_mean_intervention_on_mixed_positions(tmp_path):
