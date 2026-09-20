@@ -20,6 +20,19 @@ def test_load_model_resolves_structure_from_config():
     assert handle.backend in ("nnterp", "raw_hooks")
 
 
+def test_load_model_puts_the_model_in_eval_mode():
+    """Regression guard: the nnterp backend used to never call .eval() (only
+    the raw_hooks fallback did), leaving the model in its post-from_pretrained
+    default of train mode. Harmless for a model with zero dropout probability
+    (tiny-gpt2), but for any real architecture with active dropout this would
+    inject genuine, unseeded randomness into every forward pass this whole
+    pipeline makes -- accuracy, factorizability, position_test, and
+    mean_intervention alike -- silently undermining every causal-effect
+    measurement's reproducibility."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    assert handle._model.training is False
+
+
 def test_read_residual_returns_correct_shape():
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     tokenizer = handle._tokenizer

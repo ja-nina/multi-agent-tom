@@ -70,6 +70,7 @@ def load_model(model_id: str, dtype: torch.dtype = torch.bfloat16) -> ModelHandl
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     try:
         model = _load_nnterp_model(model_id, dtype)
+        model.eval()
         backend: Literal["nnterp", "raw_hooks"] = "nnterp"
     except Exception as exc:  # noqa: BLE001 -- intentional: any nnterp failure
         # (unsupported architecture, version mismatch, ...) must fall back to
