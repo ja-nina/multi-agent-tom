@@ -72,6 +72,75 @@ def _write_mixed_position_dataset(tmp_path):
     return tmp_path
 
 
+def _write_t3a_dataset(tmp_path):
+    """T3a records: the trait is INFERRED (reliable/unreliable), never stated,
+    via a >= 2-turn transcript. Every pair's query agent sits at position 0 --
+    this fixture is only used to test `run_battery`'s trait_contrast lookup for
+    T3a via mean_intervention, which (unlike position_test) never pools by
+    query-agent position, so an all-position-0 dataset is a valid regression
+    fixture for that specific check."""
+    from personabind.record import AgentSpec, Record, Turn, to_jsonl_line
+
+    records = []
+    for i in range(6):
+        pair_idx = i // 2
+        level = i % 2
+        trait, other = ("reliable", "unreliable") if level == 1 else ("unreliable", "reliable")
+        doug, charles = f"Doug{pair_idx}", f"Charles{pair_idx}"
+        turns = [
+            Turn("q1", "Q1?", "gold1", "wrong1", {doug: {"text": "answer1"}, charles: {"text": "answer1b"}}),
+            Turn("q2", "Q2?", "gold2", "wrong2", {doug: {"text": "answer2"}, charles: {"text": "answer2b"}}),
+        ]
+        context = (
+            f"Q1: Q1?\n{doug}: answer1\n{charles}: answer1b\n\n"
+            f"Q2: Q2?\n{doug}: answer2\n{charles}: answer2b"
+        )
+        records.append(Record(
+            id=f"t3a_{i:06d}", variant="t3a_inferred_templated", format="n/a", domain="history",
+            name_style="personal", context=context,
+            question=f"How reliable is {doug}?", answer_prefix=f"{doug} is",
+            agents=[AgentSpec(doug, 0, trait, level), AgentSpec(charles, 1, other, 1 - level)],
+            query_agent=doug, answer=trait,
+            counterfactual_id=f"t3a_{i + 1:06d}" if i % 2 == 0 else f"t3a_{i - 1:06d}",
+            counterfactual_diff="agent_correctness_map", seed=1, turns=turns,
+        ))
+    path = tmp_path / "t3a_inferred_templated.jsonl"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(to_jsonl_line(r) + "\n" for r in records)
+    return tmp_path
+
+
+def test_run_battery_resolves_t3a_trait_contrast_when_t3a_is_the_only_variant(tmp_path):
+    """Regression test for a real bug: `run_battery` used to decide whether to
+    run tests 3/4 via `config["variants"].index(variant) < 2` (list POSITION,
+    not variant identity) and then a trait_contrast ternary with only a
+    t1_discrete branch and a T2-tiers fallback -- no branch for T3a at all. If
+    `variants` starts with T3a alone (e.g. skipping T1/T2 because they already
+    passed), T3a lands at index 0 (< 2), so tests 3/4 WOULD have tried to run
+    but been silently handed T2's ("board-certified expert", "first-year
+    student") vocabulary instead of T3a's own ("reliable", "unreliable") --
+    every T3a record's answer would fail that filter, producing an empty
+    train fold that `run_mean_intervention_safe`/`run_position_test_safe`
+    swallow into a bare warning, with no output at all. This proves T3a's own
+    contrast is now resolved by variant NAME, so tests 3/4 actually produce
+    rows even when T3a is the sole configured variant."""
+    dataset_dir = _write_t3a_dataset(tmp_path)
+    output_dir = tmp_path / "results"
+    config = {
+        "seed": 1, "variants": ["t3a_inferred_templated"], "dataset_dir": str(dataset_dir),
+        "sample_size": 3, "train_fraction": 0.5, "layer_sweep": [0],
+        "accuracy_floor": 0.0, "causal_clear_margin": 2.0,
+        "mean_intervention_coefficients": [1.0], "output_dir": str(output_dir),
+        "dtype": "float32",
+    }
+    run_battery(TINY_MODEL, config)
+    path = output_dir / f"{TINY_MODEL.replace('/', '_')}__t3a_inferred_templated__mean_intervention.jsonl"
+    assert path.exists(), "mean_intervention never ran for a lone T3a variant -- trait_contrast lookup is still broken"
+    with open(path, encoding="utf-8") as fh:
+        lines = [line for line in fh if line.strip()]
+    assert len(lines) > 0, "mean_intervention produced no rows -- T3a's train fold was likely empty (wrong trait_contrast)"
+
+
 def test_run_battery_stops_on_low_accuracy_and_writes_verdict(tmp_path):
     dataset_dir = _write_tiny_dataset(tmp_path)
     output_dir = tmp_path / "results"

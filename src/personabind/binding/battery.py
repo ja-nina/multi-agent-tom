@@ -97,7 +97,7 @@ def run_battery(model_id: str, config: dict) -> dict:
     from personabind.binding.report import aggregate_intervention_results
     from personabind.binding.results import write_jsonl
     from personabind.common.activations import load_model, verify_tooling
-    from personabind.generator.traits import T1_TRAITS, T2_TIERS
+    from personabind.generator.traits import T1_TRAITS, T2_TIERS, T3_LABELS
     from personabind.record import from_jsonl_line
 
     output_dir = config.get("output_dir", "results/binding")
@@ -114,6 +114,17 @@ def run_battery(model_id: str, config: dict) -> dict:
     seed = config["seed"]
     layers = config["layer_sweep"] if config["layer_sweep"] != "all" else list(range(handle.num_layers))
     variant_fail_key = {"t1_discrete": "t1_fails", "t2_graded": "t2_fails", "t3a_inferred_templated": "t3a_fails"}
+    # Bind each variant's contrast to the generator's own vocabulary rather than
+    # re-typing strings, and key by VARIANT NAME rather than list position -- a
+    # `variants` list that doesn't start with t1_discrete/t2_graded (e.g. running
+    # T3a on its own) must still resolve the correct contrast for whichever
+    # variant is actually being processed. T1's two traits; T2's highest vs
+    # lowest tier; T3a's reliable/unreliable inferred label.
+    trait_contrast_by_variant = {
+        "t1_discrete": (T1_TRAITS[0][0], T1_TRAITS[1][0]),
+        "t2_graded": (T2_TIERS[-1][0], T2_TIERS[0][0]),
+        "t3a_inferred_templated": (T3_LABELS[1], T3_LABELS[0]),
+    }
 
     for variant in config["variants"]:
         path = os.path.join(config["dataset_dir"], f"{variant}.jsonl")
@@ -157,13 +168,8 @@ def run_battery(model_id: str, config: dict) -> dict:
             stored_only = [r for r in factorizability_results if r.patch_site == "stored"]
             causal_effects_by_layer = aggregate_intervention_results(stored_only)
 
-            if config["variants"].index(variant) < 2:  # trait_contrast only defined for T1/T2
-                # Bind the contrast to the generator's own vocabulary rather than
-                # re-typing the strings: T1's two traits, and T2's highest vs lowest tier.
-                trait_contrast = (
-                    (T1_TRAITS[0][0], T1_TRAITS[1][0]) if variant == "t1_discrete"
-                    else (T2_TIERS[-1][0], T2_TIERS[0][0])
-                )
+            trait_contrast = trait_contrast_by_variant.get(variant)
+            if trait_contrast is not None:
                 position_results = run_position_test_safe(
                     handle, sampled_records, trait_contrast, layers, config["train_fraction"], seed, config_hash,
                 )
