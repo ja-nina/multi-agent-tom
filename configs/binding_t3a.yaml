@@ -1,0 +1,23 @@
+# Skips T1/T2 -- use once those have already cleared the gate for this model
+# (check results/binding/<model>_verdict.json first) and you only need T3a's
+# result. T3b is included but INFORMATIONAL ONLY: it has no kill-criteria row
+# (the spec never defined stop-on-failure semantics for it), so its
+# accuracy/causal-test numbers get computed and written the same as any other
+# variant, but it can never set the verdict or stop the walk -- see
+# run_battery's variant_fail_key in src/personabind/binding/battery.py.
+#
+# Everything else matches configs/binding.yaml -- copy any changes you make
+# there (sample_size, layer_sweep, dtype, ...) over here too if you want this
+# run to stay comparable.
+seed: 20260910
+models: [Qwen/Qwen3-4B, Qwen/Qwen3-8B]
+variants: [t3a_inferred_templated, t3b_inferred_llm]
+dataset_dir: data/
+sample_size: 1000
+train_fraction: 0.5
+layer_sweep: all
+accuracy_floor: 0.90
+causal_clear_margin: 2.0
+mean_intervention_coefficients: [0.5, 1.0, 2.0, 4.0]
+output_dir: results/binding
+dtype: bfloat16

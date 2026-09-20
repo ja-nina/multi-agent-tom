@@ -113,17 +113,24 @@ def run_battery(model_id: str, config: dict) -> dict:
     verdict_key = "all_pass"
     seed = config["seed"]
     layers = config["layer_sweep"] if config["layer_sweep"] != "all" else list(range(handle.num_layers))
+    # Only these three variants are part of the spec's stop-on-failure kill-
+    # criteria walk. t3b_inferred_llm is deliberately absent: the spec never
+    # defined gate semantics for it, so it's evaluated INFORMATIONALLY only
+    # (accuracy + causal tests computed and written, same as any other
+    # variant) if a caller includes it in config["variants"] -- but it can
+    # never set `verdict_key` or stop the walk, whether it "passes" or not.
     variant_fail_key = {"t1_discrete": "t1_fails", "t2_graded": "t2_fails", "t3a_inferred_templated": "t3a_fails"}
     # Bind each variant's contrast to the generator's own vocabulary rather than
     # re-typing strings, and key by VARIANT NAME rather than list position -- a
     # `variants` list that doesn't start with t1_discrete/t2_graded (e.g. running
     # T3a on its own) must still resolve the correct contrast for whichever
     # variant is actually being processed. T1's two traits; T2's highest vs
-    # lowest tier; T3a's reliable/unreliable inferred label.
+    # lowest tier; T3a/T3b's shared reliable/unreliable inferred label.
     trait_contrast_by_variant = {
         "t1_discrete": (T1_TRAITS[0][0], T1_TRAITS[1][0]),
         "t2_graded": (T2_TIERS[-1][0], T2_TIERS[0][0]),
         "t3a_inferred_templated": (T3_LABELS[1], T3_LABELS[0]),
+        "t3b_inferred_llm": (T3_LABELS[1], T3_LABELS[0]),
     }
 
     for variant in config["variants"]:
@@ -200,7 +207,11 @@ def run_battery(model_id: str, config: dict) -> dict:
 
         passed = gate_variant(acc_summary["accuracy"], causal_effects_by_layer, config["accuracy_floor"], config["causal_clear_margin"])
         per_variant[variant] = {"accuracy": acc_summary, "passed": passed}
-        if not passed:
+        # Only a variant with a defined kill-criteria row can stop the walk or
+        # set the verdict -- an informational-only variant (t3b_inferred_llm)
+        # still gets its accuracy/causal-test numbers computed and recorded
+        # above, but never gates anything, whether it "passed" or not.
+        if variant in variant_fail_key and not passed:
             verdict_key = variant_fail_key[variant]
             break
 

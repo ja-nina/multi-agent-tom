@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 from personabind.binding.battery import run_battery
 
@@ -139,6 +140,71 @@ def test_run_battery_resolves_t3a_trait_contrast_when_t3a_is_the_only_variant(tm
     with open(path, encoding="utf-8") as fh:
         lines = [line for line in fh if line.strip()]
     assert len(lines) > 0, "mean_intervention produced no rows -- T3a's train fold was likely empty (wrong trait_contrast)"
+
+
+def _write_t3b_dataset(dataset_dir):
+    """t3b_inferred_llm has no LLM-generation dependency needed for this test --
+    same record shape as T3a's fixture (shared reliable/unreliable vocabulary,
+    inferred-from-transcript trait), just relabeled. Written into an EXISTING
+    dataset_dir alongside another variant's file, since run_battery reads every
+    configured variant from the same `dataset_dir`."""
+    from personabind.record import AgentSpec, Record, Turn, to_jsonl_line
+
+    # A single (base, twin) pair -- both members MUST share agent names (only
+    # trait/level swaps between them), matching generator/build.py's real
+    # counterfactual-pair convention. Per-record-index names here would make
+    # factorizability's off-target trait_of() lookup raise StopIteration.
+    doug, charles = "Doug0", "Charles0"
+    records = []
+    for i in range(2):
+        trait, other = ("reliable", "unreliable") if i == 0 else ("unreliable", "reliable")
+        turns = [
+            Turn("q1", "Q1?", "gold1", "wrong1", {doug: {"text": "answer1"}, charles: {"text": "answer1b"}}),
+            Turn("q2", "Q2?", "gold2", "wrong2", {doug: {"text": "answer2"}, charles: {"text": "answer2b"}}),
+        ]
+        context = (
+            f"Q1: Q1?\n{doug}: answer1\n{charles}: answer1b\n\n"
+            f"Q2: Q2?\n{doug}: answer2\n{charles}: answer2b"
+        )
+        records.append(Record(
+            id=f"t3b_{i:06d}", variant="t3b_inferred_llm", format="n/a", domain="history",
+            name_style="personal", context=context,
+            question=f"How reliable is {doug}?", answer_prefix=f"{doug} is",
+            agents=[AgentSpec(doug, 0, trait, 1 if trait == "reliable" else 0),
+                    AgentSpec(charles, 1, other, 1 if other == "reliable" else 0)],
+            query_agent=doug, answer=trait,
+            counterfactual_id=f"t3b_{1 - i:06d}",
+            counterfactual_diff="agent_correctness_map", seed=1, turns=turns,
+        ))
+    path = dataset_dir / "t3b_inferred_llm.jsonl"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(to_jsonl_line(r) + "\n" for r in records)
+
+
+def test_run_battery_treats_t3b_as_informational_and_never_gating(tmp_path):
+    """t3b_inferred_llm has no kill-criteria row in VERDICT_ROWS -- the spec
+    never defined stop-on-failure semantics for it. It must still get its
+    accuracy/causal-test numbers computed and recorded in per_variant, but
+    must NEVER set verdict_key or stop the walk, even when its own gate check
+    fails. Before this fix, `variant_fail_key[variant]` would have raised
+    KeyError the first time a t3b variant's gate check failed at all."""
+    dataset_dir = _write_tiny_dataset(tmp_path)
+    _write_t3b_dataset(dataset_dir)
+    output_dir = tmp_path / "results"
+    config = {
+        "seed": 1, "variants": ["t1_discrete", "t3b_inferred_llm"], "dataset_dir": str(dataset_dir),
+        "sample_size": 3, "train_fraction": 0.5, "layer_sweep": [0],
+        "accuracy_floor": 0.0, "causal_clear_margin": 2.0,
+        "mean_intervention_coefficients": [1.0], "output_dir": str(output_dir),
+        "dtype": "float32",
+    }
+    # gate_variant is called exactly once per variant, in list order: force t1
+    # to pass and t3b to fail deterministically -- real tiny-gpt2 causal
+    # effects are noisy/random and can't be forced to fail on demand otherwise.
+    with patch("personabind.binding.battery.gate_variant", side_effect=[True, False]):
+        result = run_battery(TINY_MODEL, config)
+    assert result["per_variant"]["t3b_inferred_llm"]["passed"] is False
+    assert result["verdict"] == "all_pass"  # t3b's failure must never set verdict_key
 
 
 def test_run_battery_stops_on_low_accuracy_and_writes_verdict(tmp_path):
