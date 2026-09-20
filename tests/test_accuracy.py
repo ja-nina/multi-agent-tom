@@ -191,6 +191,21 @@ def test_run_accuracy_populates_sample_completion_for_human_inspection():
     assert results[0].predicted in ("expert", "novice")  # unaffected by whatever the free sample says
 
 
+def test_run_accuracy_skips_free_completion_past_the_sample_limit():
+    """sample_free_completion has no KV-cache, so it dominates wall-clock at
+    realistic sample sizes -- it must only run for the first
+    `sample_completion_limit` records (records already arrive pre-shuffled,
+    so this is a random subsample, not a biased one). Records past the limit
+    still get scored normally; they just get sample_completion=""."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    records = [_record(answer="expert"), _record(answer="novice", other_trait="expert")]
+    results = run_accuracy(handle, records, seed=1, sample_completion_limit=1)
+    assert results[0].sample_completion != ""
+    assert results[1].sample_completion == ""
+    # scoring is unaffected by the cap -- both records still get a real verdict.
+    assert results[1].predicted in ("expert", "novice")
+
+
 def test_run_accuracy_populates_prompt_with_the_exact_text_the_model_saw():
     """prompt must be the FULL text fed to the model -- context + question +
     the A/B multiple-choice block, verbatim -- not the record's original

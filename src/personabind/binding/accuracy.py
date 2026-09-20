@@ -199,11 +199,21 @@ def _mc_answer_prefix(query_agent: str, trait_for_a: str, trait_for_b: str) -> s
 def run_accuracy(
     handle: ModelHandle, records: list[Record], seed: int,
     on_result: Callable[[AccuracyResult], None] | None = None,
+    sample_completion_limit: int = 20,
 ) -> list[AccuracyResult]:
     """`on_result`, if given, is called with each `AccuracyResult` immediately
     as it's computed -- e.g. to stream it to disk (see
     `personabind.binding.results.append_jsonl`) rather than waiting for the
-    whole (potentially very long) call to finish before anything is written."""
+    whole (potentially very long) call to finish before anything is written.
+
+    `sample_free_completion` has no KV-cache, so it re-runs a full forward
+    pass per generated token -- cost scales roughly quadratically with its
+    `n_tokens` and dominates this function's wall-clock at realistic sample
+    sizes. It's purely a diagnostic for human inspection and never used for
+    scoring, so it's only computed for the first `sample_completion_limit`
+    records (records already arrive pre-shuffled from the caller, so this is
+    a random subsample, not a biased one); the rest get `sample_completion=""`
+    at effectively no extra cost."""
     a_ids = _token_ids_for(handle, "A")
     b_ids = _token_ids_for(handle, "B")
 
@@ -228,7 +238,11 @@ def run_accuracy(
 
         a_logprob = sequence_logprob(handle, prompt_ids, a_ids)
         b_logprob = sequence_logprob(handle, prompt_ids, b_ids)
-        sample = sample_free_completion(handle, prompt_ids, seed=seed + idx)
+        sample = (
+            sample_free_completion(handle, prompt_ids, seed=seed + idx)
+            if idx < sample_completion_limit
+            else ""
+        )
 
         predicted = trait_for_a if a_logprob > b_logprob else trait_for_b
         result = AccuracyResult(
