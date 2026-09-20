@@ -16,6 +16,12 @@ class AccuracyResult:
     gold: str
     correct: bool
     seed: int
+    # Purely informational: what the model would say if actually left to
+    # generate freely (never used for scoring -- see accuracy.py's module
+    # docstring for why free generation is unreliable for that). Lets a human
+    # sanity-check the forced-choice verdict above against what the model
+    # would actually have said unprompted.
+    sample_completion: str = ""
 
 
 @dataclass(frozen=True)

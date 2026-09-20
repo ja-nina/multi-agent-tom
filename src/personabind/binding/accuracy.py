@@ -60,6 +60,21 @@ def sequence_logprob(handle: ModelHandle, prompt_ids: torch.Tensor, candidate_id
     return total
 
 
+def sample_free_completion(handle: ModelHandle, prompt_ids: torch.Tensor, n_tokens: int = 8) -> str:
+    """Greedily generate `n_tokens` tokens of free text after `prompt_ids`.
+    NEVER used for scoring (see this module's docstring for why free
+    generation is unreliable for that) -- purely so a human reading the
+    JSONL can sanity-check the forced-choice verdict against what the model
+    would actually have said if left to talk."""
+    ids = prompt_ids.clone()
+    for _ in range(n_tokens):
+        logits = forward_logits(handle, ids)
+        next_id = logits[0, -1].argmax().item()
+        ids = torch.cat([ids, torch.tensor([[next_id]])], dim=1)
+    new_ids = ids[0, prompt_ids.shape[1]:].tolist()
+    return handle._tokenizer.decode(new_ids).strip()
+
+
 def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[AccuracyResult]:
     results = []
     for record in tqdm(records, desc="accuracy", unit="record", file=sys.stdout):
@@ -71,11 +86,13 @@ def run_accuracy(handle: ModelHandle, records: list[Record], seed: int) -> list[
 
         own_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, record.answer))
         other_logprob = sequence_logprob(handle, prompt_ids, _token_ids_for(handle, other_trait))
+        sample = sample_free_completion(handle, prompt_ids)
 
         predicted = record.answer if own_logprob > other_logprob else other_trait
         results.append(AccuracyResult(
             model=handle.model_id, variant=record.variant, record_id=record.id,
             predicted=predicted, gold=record.answer, correct=predicted == record.answer, seed=seed,
+            sample_completion=sample,
         ))
     return results
 

@@ -7,6 +7,7 @@ from personabind.binding.accuracy import (
     aggregate_accuracy,
     clopper_pearson_ci,
     run_accuracy,
+    sample_free_completion,
     sequence_logprob,
 )
 from personabind.binding.results import AccuracyResult
@@ -60,6 +61,25 @@ def test_sequence_logprob_sums_across_all_candidate_tokens():
         torch.log_softmax(forward_logits(handle, prompt_ids)[0, -1], dim=-1)[candidate_ids[0]]
     )
     assert total != pytest.approx(first_token_only, abs=1e-4)
+
+
+def test_sample_free_completion_returns_a_string_of_requested_length_tokens():
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
+    decoded = sample_free_completion(handle, ids, n_tokens=3)
+    assert isinstance(decoded, str)
+    assert len(handle._tokenizer(decoded, add_special_tokens=False).input_ids) == 3
+
+
+def test_run_accuracy_populates_sample_completion_for_human_inspection():
+    """sample_completion is purely informational (a free-generated sample a
+    human can read alongside the forced-choice verdict) -- it must be
+    populated, but must never be what `predicted`/`correct` are computed
+    from (those come only from sequence_logprob, tested elsewhere)."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    results = run_accuracy(handle, [_record()], seed=1)
+    assert results[0].sample_completion != ""
+    assert results[0].predicted in ("expert", "novice")  # unaffected by whatever the free sample says
 
 
 def test_run_accuracy_produces_one_result_per_record_with_real_fields():
