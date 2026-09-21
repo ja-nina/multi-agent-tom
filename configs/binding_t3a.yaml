@@ -21,3 +21,6 @@ causal_clear_margin: 2.0
 mean_intervention_coefficients: [0.5, 1.0, 2.0, 4.0]
 output_dir: results/binding
 dtype: bfloat16
+# See configs/binding.yaml's comment -- optional, saves test 4's raw
+# per-layer activation vectors for later offline analysis if set.
+vectors_dir: scratch/vectors

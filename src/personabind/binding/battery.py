@@ -186,6 +186,7 @@ def run_battery(model_id: str, config: dict) -> dict:
                     mean_intervention_results = run_mean_intervention_safe(
                         handle, sampled_records, trait_contrast, layers, config["mean_intervention_coefficients"],
                         config["train_fraction"], seed, config_hash, on_result=lambda r: append_jsonl(r, fh),
+                        vectors_dir=config.get("vectors_dir"),
                     )
                 if mean_intervention_results:
                     mi_effects = best_coefficient_effect_by_layer(mean_intervention_results)
@@ -228,7 +229,8 @@ def run_position_test_safe(handle, records, trait_contrast, layers, train_fracti
 
 
 def run_mean_intervention_safe(
-    handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash, on_result=None,
+    handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash,
+    on_result=None, vectors_dir=None,
 ):
     import warnings
 
@@ -236,7 +238,7 @@ def run_mean_intervention_safe(
     try:
         return run_mean_intervention(
             handle, records, trait_contrast, layers, coefficients, train_fraction, seed, config_hash,
-            on_result=on_result,
+            on_result=on_result, vectors_dir=vectors_dir,
         )
     except ValueError as exc:
         warnings.warn(

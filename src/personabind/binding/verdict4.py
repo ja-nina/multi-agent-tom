@@ -84,6 +84,7 @@ def run_test4_only(model_id: str, config: dict, variant: str) -> dict:
         mean_intervention_results = run_mean_intervention_safe(
             handle, sampled_records, trait_contrast, layers, config["mean_intervention_coefficients"],
             config["train_fraction"], seed, config_hash, on_result=lambda r: append_jsonl(r, fh),
+            vectors_dir=config.get("vectors_dir"),
         )
 
     causal_effects_by_layer: dict[int, tuple[float, float]] = {}

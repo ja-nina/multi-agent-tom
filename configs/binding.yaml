@@ -10,3 +10,9 @@ causal_clear_margin: 2.0
 mean_intervention_coefficients: [0.5, 1.0, 2.0, 4.0]
 output_dir: results/binding
 dtype: bfloat16
+# Optional: if set, test 4 (mean intervention) saves every layer's raw
+# activation vectors (the ones used to fit that layer's pairwise direction)
+# plus metadata to {vectors_dir}/{model}__{variant}__layer{N}.pt, for later
+# offline analysis. Omit this key entirely to skip saving (no behavior
+# change otherwise).
+vectors_dir: scratch/vectors
