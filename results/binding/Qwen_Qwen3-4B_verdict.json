@@ -1,0 +1,16 @@
+{
+  "model": "Qwen/Qwen3-4B",
+  "verdict": "t3a_fails",
+  "message": "Stated traits bind, inferred don't -- reshape around stated personas",
+  "per_variant": {
+    "t3a_inferred_templated": {
+      "accuracy": {
+        "accuracy": 0.5305,
+        "n": 2000,
+        "ci_low": 0.5083465390605326,
+        "ci_high": 0.5525639184243527
+      },
+      "passed": false
+    }
+  }
+}

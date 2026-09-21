@@ -4,7 +4,7 @@
 #SBATCH -p gpu-a100
 #SBATCH -c 10
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=gpu22-a40-05,gpu22-a40-06,gpu17-l40-07,gpu17-l40-20
+#SBATCH --exclude=gpu22-a100-03
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm-logs/binding-%A_%a.out
 #SBATCH --error=slurm-logs/binding-%A_%a.err

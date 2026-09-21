@@ -1,0 +1,16 @@
+{
+  "model": "Qwen/Qwen3-8B",
+  "verdict": "t1_fails",
+  "message": "Rig broken, or model too small -- re-run at the next larger model before concluding anything",
+  "per_variant": {
+    "t1_discrete": {
+      "accuracy": {
+        "accuracy": 0.5,
+        "n": 2000,
+        "ci_low": 0.4778505542311098,
+        "ci_high": 0.5221494457688902
+      },
+      "passed": false
+    }
+  }
+}
