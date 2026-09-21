@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,6 +108,43 @@ def to_jsonl_line(rec: Record) -> str:
         payload["turns"] = [_turn_to_dict(t) for t in rec.turns]
     ordered = {k: payload[k] for k in _FIELD_ORDER if k in payload}
     return json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+
+
+def sample_base_records(all_records: list[Record], sample_size: int, seed: int) -> list[Record]:
+    """Deterministically (given `seed`) sample `sample_size` BASE records --
+    by convention, the lexicographically first-seen id of each counterfactual
+    pair. Does NOT include twins -- a caller that needs the explicit (base,
+    twin) pairing (e.g. `battery.run_battery`'s factorizability pairs, which
+    care which member is which) builds it from this list directly; a caller
+    that just wants the flat sampled set uses `sample_records_with_twins`
+    below."""
+    rng = random.Random(seed)
+    seen_pairs = set()
+    base_candidates = []
+    for r in all_records:
+        pair_key = frozenset({r.id, r.counterfactual_id})
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        base_candidates.append(r)
+    rng.shuffle(base_candidates)
+    return base_candidates[:sample_size]
+
+
+def sample_records_with_twins(all_records: list[Record], sample_size: int, seed: int) -> list[Record]:
+    """`sample_base_records`, plus each sampled base's counterfactual twin
+    included automatically -- the flat base+twin set most callers (accuracy,
+    position_test, mean_intervention, the standalone `cot_diagnostic`) want,
+    as opposed to the explicit (base, twin) pairing factorizability needs."""
+    sampled_bases = sample_base_records(all_records, sample_size, seed)
+    by_id = {r.id: r for r in all_records}
+    sampled_records = []
+    for base in sampled_bases:
+        sampled_records.append(base)
+        twin = by_id.get(base.counterfactual_id)
+        if twin is not None:
+            sampled_records.append(twin)
+    return sampled_records
 
 
 def from_jsonl_line(line: str) -> Record:

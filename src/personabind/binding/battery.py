@@ -88,7 +88,6 @@ def write_verdict(model_id: str, output_dir: str, verdict_key: str, per_variant:
 
 
 def run_battery(model_id: str, config: dict) -> dict:
-    import random
     import sys
 
     import torch
@@ -100,7 +99,7 @@ def run_battery(model_id: str, config: dict) -> dict:
     from personabind.binding.results import append_jsonl
     from personabind.common.activations import load_model, verify_tooling
     from personabind.generator.traits import T1_TRAITS, T2_TIERS, T3_LABELS
-    from personabind.record import from_jsonl_line
+    from personabind.record import from_jsonl_line, sample_base_records
 
     output_dir = config.get("output_dir", "results/binding")
     os.makedirs(output_dir, exist_ok=True)
@@ -141,19 +140,7 @@ def run_battery(model_id: str, config: dict) -> dict:
         path = os.path.join(config["dataset_dir"], f"{variant}.jsonl")
         with open(path, encoding="utf-8") as fh:
             all_records = [from_jsonl_line(line) for line in fh if line.strip()]
-        rng = random.Random(seed)
-        # sample `sample_size` BASE records (by convention, the lexicographically first id
-        # of each counterfactual pair), then include each one's twin automatically
-        seen_pairs = set()
-        base_candidates = []
-        for r in all_records:
-            pair_key = frozenset({r.id, r.counterfactual_id})
-            if pair_key in seen_pairs:
-                continue
-            seen_pairs.add(pair_key)
-            base_candidates.append(r)
-        rng.shuffle(base_candidates)
-        sampled_bases = base_candidates[: config["sample_size"]]
+        sampled_bases = sample_base_records(all_records, config["sample_size"], seed)
         by_id = {r.id: r for r in all_records}
         sampled_records = []
         for base in sampled_bases:

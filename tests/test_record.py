@@ -4,6 +4,8 @@ from personabind.record import (
     AgentSpec,
     Record,
     from_jsonl_line,
+    sample_base_records,
+    sample_records_with_twins,
     to_jsonl_line,
 )
 
@@ -72,3 +74,42 @@ def test_validate_accepts_na_format_for_t3():
         answer="reliable",
     )
     rec.validate()  # must not raise
+
+
+def _pair(i):
+    base = _t1_record(id=f"t1_{i:06d}", counterfactual_id=f"t1_{i + 1:06d}")
+    twin = _t1_record(id=f"t1_{i + 1:06d}", counterfactual_id=f"t1_{i:06d}")
+    return base, twin
+
+
+def test_sample_base_records_never_returns_both_members_of_a_pair():
+    all_records = [r for i in range(0, 20, 2) for r in _pair(i)]
+    bases = sample_base_records(all_records, sample_size=10, seed=1)
+    assert len(bases) == 10
+    pair_keys = {frozenset({r.id, r.counterfactual_id}) for r in bases}
+    assert len(pair_keys) == len(bases), "sample_base_records returned both members of at least one pair"
+
+
+def test_sample_base_records_is_deterministic_given_the_same_seed():
+    all_records = [r for i in range(0, 20, 2) for r in _pair(i)]
+    a = sample_base_records(all_records, sample_size=5, seed=7)
+    b = sample_base_records(all_records, sample_size=5, seed=7)
+    assert [r.id for r in a] == [r.id for r in b]
+
+
+def test_sample_records_with_twins_includes_every_sampled_bases_twin():
+    all_records = [r for i in range(0, 20, 2) for r in _pair(i)]
+    bases = sample_base_records(all_records, sample_size=6, seed=3)
+    sampled = sample_records_with_twins(all_records, sample_size=6, seed=3)
+    assert {r.id for r in bases} <= {r.id for r in sampled}
+    expected_twin_ids = {b.counterfactual_id for b in bases}
+    assert expected_twin_ids <= {r.id for r in sampled}
+    assert len(sampled) == 2 * len(bases)  # every fixture pair has both members present
+
+
+def test_sample_records_with_twins_omits_a_missing_twin_without_crashing():
+    all_records = [r for i in range(0, 20, 2) for r in _pair(i)]
+    orphan = _t1_record(id="t1_999000", counterfactual_id="t1_999001")  # twin not in all_records
+    sampled = sample_records_with_twins(all_records + [orphan], sample_size=100, seed=1)
+    assert sum(1 for r in sampled if r.id == "t1_999000") == 1
+    assert sum(1 for r in sampled if r.id == "t1_999001") == 0

@@ -1,4 +1,100 @@
+import json
+
 from personabind.cli import main
+
+
+def _write_t3a_dataset(tmp_path):
+    from personabind.record import AgentSpec, Record, Turn, to_jsonl_line
+
+    records = []
+    for i in range(4):
+        pair_idx = i // 2
+        level = i % 2
+        trait, other = ("reliable", "unreliable") if level == 1 else ("unreliable", "reliable")
+        doug, charles = f"Doug{pair_idx}", f"Charles{pair_idx}"
+        turns = [
+            Turn("q1", "Q1?", "gold1", "wrong1", {doug: {"text": "answer1"}, charles: {"text": "answer1b"}}),
+            Turn("q2", "Q2?", "gold2", "wrong2", {doug: {"text": "answer2"}, charles: {"text": "answer2b"}}),
+        ]
+        context = f"Q1: Q1?\n{doug}: answer1\n{charles}: answer1b\n\nQ2: Q2?\n{doug}: answer2\n{charles}: answer2b"
+        records.append(Record(
+            id=f"t3a_{i:06d}", variant="t3a_inferred_templated", format="n/a", domain="history",
+            name_style="personal", context=context,
+            question=f"How reliable is {doug}?", answer_prefix=f"{doug} is",
+            agents=[AgentSpec(doug, 0, trait, level), AgentSpec(charles, 1, other, 1 - level)],
+            query_agent=doug, answer=trait,
+            counterfactual_id=f"t3a_{i + 1:06d}" if i % 2 == 0 else f"t3a_{i - 1:06d}",
+            counterfactual_diff="agent_correctness_map", seed=1, turns=turns,
+        ))
+    path = tmp_path / "t3a_inferred_templated.jsonl"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(to_jsonl_line(r) + "\n" for r in records)
+    return path
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+        self.reasoning_content = None
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [type("C", (), {"message": _FakeMessage(content)})()]
+
+
+class _FakeClient:
+    """Stands in for `openai.OpenAI` -- always answers "Final answer: A", so
+    this test only needs to check plumbing (dataset loaded, sampled, streamed
+    to the right file), not scoring correctness (already covered by
+    tests/test_cot_diagnostic.py)."""
+
+    def __init__(self, *args, **kwargs):
+        self.calls = []
+        self.chat = type("Chat", (), {"completions": self})()
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeResponse("Final answer: A")
+
+
+def test_binding_cot_diagnostic_streams_one_row_per_record(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    dataset_path = _write_t3a_dataset(tmp_path)
+    (tmp_path / "configs").mkdir()
+    config_path = tmp_path / "configs" / "binding.yaml"
+    config_path.write_text(
+        "seed: 1\nsample_size: 4\noutput_dir: results/binding\n"
+        "models: []\nvariants: []\ndataset_dir: data/\ntrain_fraction: 0.5\n"
+        "layer_sweep: all\naccuracy_floor: 0.9\ncausal_clear_margin: 2.0\n"
+        "mean_intervention_coefficients: [1.0]\ndtype: bfloat16\n"
+    )
+
+    fake_client_holder = {}
+
+    def fake_openai(*args, **kwargs):
+        client = _FakeClient()
+        fake_client_holder["client"] = client
+        return client
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", fake_openai)
+
+    rc = main([
+        "binding", "cot-diagnostic",
+        "--model", "fake-model",
+        "--base-url", "http://127.0.0.1:9999/v1",
+        "--dataset", str(dataset_path),
+        "--config", str(config_path),
+    ])
+    assert rc == 0
+
+    out_path = tmp_path / "results" / "binding" / "fake-model__t3a_cot_diagnostic.jsonl"
+    assert out_path.exists()
+    with open(out_path, encoding="utf-8") as fh:
+        lines = [json.loads(l) for l in fh]
+    assert len(lines) == 4  # sample_size=4 base records, dataset has 2 pairs -> all 4 included
+    assert all(row["parsed_letter"] == "A" for row in lines)
 
 
 def test_build_then_report_roundtrip(tmp_path, monkeypatch):

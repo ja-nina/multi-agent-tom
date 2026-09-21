@@ -29,6 +29,32 @@ class AccuracyResult:
 
 
 @dataclass(frozen=True)
+class CoTDiagnosticResult:
+    """A single T3a record scored via `cot_diagnostic.run_cot_diagnostic`
+    (free-form CoT + a parsed A/B verdict, via a vLLM server) -- purely a
+    SECONDARY, informational check of whether letting the model reason
+    changes the picture versus the official forced-choice accuracy number
+    (`AccuracyResult`, which this NEVER feeds into or replaces)."""
+
+    model: str
+    variant: str
+    record_id: str
+    gold: str
+    seed: int
+    # None (not "wrong") when the response's final letter couldn't be parsed
+    # at all -- an unparseable response is a different failure mode than a
+    # genuinely wrong answer, and silently scoring it as incorrect would
+    # conflate the two.
+    predicted: str | None
+    correct: bool | None
+    parsed_letter: str | None
+    # Full generated text (reasoning trace + final answer, whichever fields
+    # the server split them into) -- for human inspection, same spirit as
+    # AccuracyResult.sample_completion/prompt above.
+    response: str
+
+
+@dataclass(frozen=True)
 class InterventionResult:
     test: str
     record_id: str
