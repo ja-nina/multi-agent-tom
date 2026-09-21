@@ -14,7 +14,7 @@ from personabind.binding.accuracy import (
     sequence_logprob,
 )
 from personabind.binding.results import AccuracyResult
-from personabind.common.activations import forward_logits, load_model
+from personabind.common.activations import forward_logits, forward_logits_cached, load_model
 from personabind.record import AgentSpec, Record, Turn
 
 TINY_MODEL = "sshleifer/tiny-gpt2"
@@ -104,20 +104,20 @@ def test_sample_free_completion_stops_early_at_eos_instead_of_forcing_n_tokens()
     eos_id = handle._tokenizer.eos_token_id
     assert eos_id is not None, "fixture model must have a real eos_token_id to force"
 
-    real_forward_logits = forward_logits
+    real_forward_logits_cached = forward_logits_cached
     call_count = {"n": 0}
 
-    def force_eos_on_first_call(handle_arg, input_ids):
+    def force_eos_on_first_call(handle_arg, input_ids, past_key_values=None):
         call_count["n"] += 1
-        logits = real_forward_logits(handle_arg, input_ids)
+        logits, past = real_forward_logits_cached(handle_arg, input_ids, past_key_values)
         if call_count["n"] == 1:
             forced = logits.clone()
             forced[0, -1, :] = float("-inf")
             forced[0, -1, eos_id] = 0.0
-            return forced
-        return logits
+            return forced, past
+        return logits, past
 
-    with patch("personabind.binding.accuracy.forward_logits", side_effect=force_eos_on_first_call):
+    with patch("personabind.binding.accuracy.forward_logits_cached", side_effect=force_eos_on_first_call):
         sample_free_completion(handle, ids, seed=1, n_tokens=50)
     assert call_count["n"] == 1, "generation must stop after the FIRST token once EOS is produced, not continue to n_tokens=50"
 

@@ -2,8 +2,8 @@
 day-0 tooling check.
 
 Every other Phase-1 task (battery generation, patching sweeps, controls, ...)
-consumes ONLY the four free functions below -- ``load_model``,
-``forward_logits``, ``read_residual``, ``patch_residual`` -- plus
+consumes ONLY the free functions below -- ``load_model``, ``forward_logits``,
+``forward_logits_cached``, ``read_residual``, ``patch_residual`` -- plus
 ``verify_tooling``. Callers never touch nnsight/nnterp internals or know
 which backend is active.
 
@@ -124,6 +124,30 @@ def forward_logits(handle: ModelHandle, input_ids: torch.Tensor) -> torch.Tensor
         return logits.detach().clone()
     with torch.no_grad():
         return handle._model(input_ids).logits.detach().clone()
+
+
+def forward_logits_cached(
+    handle: ModelHandle, input_ids: torch.Tensor, past_key_values=None,
+) -> tuple[torch.Tensor, object]:
+    """Like `forward_logits`, but threads a real KV-cache across calls: pass
+    the whole prompt once with `past_key_values=None`, then on every later
+    call, pass ONLY the newly generated token(s) plus the cache this function
+    returned last time. This is what makes autoregressive generation (e.g.
+    `accuracy.sample_free_completion`) cheap -- without it, every step
+    re-runs a full forward pass over the whole growing sequence.
+
+    Both backends' underlying HF forward already accept `past_key_values`/
+    `use_cache` directly; nnterp's `.trace()` forwards them straight through
+    to the same call, so this needs no cache-specific tracing logic of its
+    own. Verified (see tests/test_activations.py) to produce logits
+    byte-identical to `forward_logits` run on the equivalent full sequence."""
+    if handle.backend == "nnterp":
+        with torch.no_grad(), handle._model.trace(input_ids, past_key_values=past_key_values, use_cache=True):
+            out = handle._model.output.save()
+        return out.logits.detach().clone(), out.past_key_values
+    with torch.no_grad():
+        out = handle._model(input_ids, past_key_values=past_key_values, use_cache=True)
+    return out.logits.detach().clone(), out.past_key_values
 
 
 def read_residual(

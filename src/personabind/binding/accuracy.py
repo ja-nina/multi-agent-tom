@@ -56,7 +56,7 @@ from tqdm import tqdm
 
 from personabind.binding.positions import answer_position, tokenize_record, trait_of
 from personabind.binding.results import AccuracyResult
-from personabind.common.activations import ModelHandle, forward_logits
+from personabind.common.activations import ModelHandle, forward_logits, forward_logits_cached
 from personabind.record import Record
 
 
@@ -103,7 +103,13 @@ def sample_free_completion(
     NEVER used for scoring (see this module's docstring for why free
     generation is unreliable for that) -- purely for human inspection. Still
     seeded for reproducibility, per this project's seed-everything
-    discipline, even though it is not itself a scored result."""
+    discipline, even though it is not itself a scored result.
+
+    Uses `forward_logits_cached`: after the first call (the full prompt),
+    every later step passes ONLY the newly generated token plus the running
+    KV-cache, instead of re-running a full forward pass over the whole
+    growing sequence each time -- verified to produce identical logits to
+    the uncached full-sequence recompute (see test_activations.py)."""
     gen_config = getattr(handle._model, "generation_config", None)
     do_sample = bool(getattr(gen_config, "do_sample", False))
     temperature = float(getattr(gen_config, "temperature", None) or 1.0)
@@ -119,13 +125,15 @@ def sample_free_completion(
 
     rng = torch.Generator().manual_seed(seed)
     ids = prompt_ids.clone()
-    # No KV-cache: each iteration re-runs a full forward pass over the whole
-    # growing sequence. The outer per-record progress bar only ticks once
-    # this ENTIRE loop finishes, so without a bar here, a single record's
-    # free-sample generation can look identical to a hang for however long
-    # this loop takes -- this makes each token's progress visible instead.
+    next_input = prompt_ids
+    past_key_values = None
+    # The outer per-record progress bar only ticks once this ENTIRE loop
+    # finishes, so without a bar here, a single record's free-sample
+    # generation can look identical to a hang for however long this loop
+    # takes -- this makes each token's progress visible instead.
     for _ in tqdm(range(n_tokens), desc="sample_free_completion", unit="tok", file=sys.stdout, leave=False):
-        logits = forward_logits(handle, ids)[0, -1].clone()
+        step_logits, past_key_values = forward_logits_cached(handle, next_input, past_key_values)
+        logits = step_logits[0, -1].clone()
         if do_sample:
             logits = logits / max(temperature, 1e-5)
             if top_k > 0:
@@ -146,7 +154,8 @@ def sample_free_completion(
             next_id = int(torch.multinomial(probs, 1, generator=rng).item())
         else:
             next_id = int(logits.argmax().item())
-        ids = torch.cat([ids, torch.tensor([[next_id]])], dim=1)
+        next_input = torch.tensor([[next_id]])
+        ids = torch.cat([ids, next_input], dim=1)
         if next_id in eos_ids:
             break
     new_ids = ids[0, prompt_ids.shape[1]:].tolist()

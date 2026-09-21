@@ -3,6 +3,7 @@ import torch
 
 from personabind.common.activations import (
     forward_logits,
+    forward_logits_cached,
     load_model,
     patch_residual,
     read_residual,
@@ -31,6 +32,30 @@ def test_load_model_puts_the_model_in_eval_mode():
     measurement's reproducibility."""
     handle = load_model(TINY_MODEL, dtype=torch.float32)
     assert handle._model.training is False
+
+
+def test_forward_logits_cached_matches_forward_logits_on_the_full_sequence():
+    """The whole point of forward_logits_cached is that stepping through a
+    sequence one new token at a time (each call only given the newest token
+    plus the previous call's cache) must produce IDENTICAL logits to a single
+    forward_logits call over the full sequence at once -- if it didn't, every
+    generation built on top of it (accuracy.sample_free_completion) would be
+    silently sampling from a different, wrong distribution."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a time there was", return_tensors="pt").input_ids
+
+    full_logits = forward_logits(handle, ids)
+
+    prefix, rest = ids[:, :3], ids[:, 3:]
+    logits, past = forward_logits_cached(handle, prefix)
+    all_logits = [logits]
+    for i in range(rest.shape[1]):
+        logits, past = forward_logits_cached(handle, rest[:, i : i + 1], past_key_values=past)
+        all_logits.append(logits)
+    cached_full = torch.cat(all_logits, dim=1)
+
+    assert cached_full.shape == full_logits.shape
+    assert torch.allclose(cached_full, full_logits, atol=1e-3)
 
 
 def test_read_residual_returns_correct_shape():
