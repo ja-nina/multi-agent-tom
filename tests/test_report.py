@@ -4,6 +4,7 @@ import pytest
 
 from personabind.binding.report import (
     aggregate_intervention_results,
+    best_coefficient_effect_by_layer,
     entanglement_flag,
     mean_and_se,
 )
@@ -119,6 +120,33 @@ def test_aggregate_intervention_results_does_not_pool_across_coefficients():
     pooled_se = aggregate_intervention_results(results)[5][1]
     assert pooled_se < grouped[(5, 1.0)][1]
     assert pooled_se < grouped[(5, 2.0)][1]
+
+
+def test_best_coefficient_effect_by_layer_picks_the_strongest_signed_sigma():
+    results = [
+        _result(5, 0.10, 0.0, coefficient=0.5, record_id="a"),
+        _result(5, 0.11, 0.0, coefficient=0.5, record_id="b"),
+        _result(5, 0.50, 0.0, coefficient=2.0, record_id="a"),
+        _result(5, 0.51, 0.0, coefficient=2.0, record_id="b"),
+    ]
+    best = best_coefficient_effect_by_layer(results)
+    assert set(best.keys()) == {5}
+    mean5, _se5 = best[5]
+    assert mean5 == pytest.approx(0.505)  # the coefficient=2.0 group, not 0.5
+
+
+def test_best_coefficient_effect_by_layer_never_prefers_a_negative_effect_by_magnitude():
+    # A strongly NEGATIVE effect (mis-signed direction, or noise) must never
+    # be preferred over a smaller genuine POSITIVE one -- never abs(sigma).
+    results = [
+        _result(5, -0.90, 0.0, coefficient=4.0, record_id="a"),
+        _result(5, -0.91, 0.0, coefficient=4.0, record_id="b"),
+        _result(5, 0.05, 0.0, coefficient=0.5, record_id="a"),
+        _result(5, 0.06, 0.0, coefficient=0.5, record_id="b"),
+    ]
+    best = best_coefficient_effect_by_layer(results)
+    mean5, _se5 = best[5]
+    assert mean5 > 0  # picked the coefficient=0.5 group, not the larger-magnitude negative one
 
 
 def test_entanglement_flag():

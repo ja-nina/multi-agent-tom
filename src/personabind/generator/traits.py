@@ -11,6 +11,25 @@ T2_TIERS: list[tuple[str, int]] = [
 
 T3_LABELS: dict[int, str] = {1: "reliable", 0: "unreliable"}
 
+# Each variant's (high, low) trait-contrast pair for the causal tests
+# (factorizability/position_test/mean_intervention), keyed by VARIANT NAME
+# rather than list position -- a caller processing variants out of order
+# (e.g. running T3a on its own) must still resolve the correct contrast.
+# Shared by battery.run_battery and any standalone per-test runner (e.g.
+# verdict4) so both resolve a variant's contrast identically.
+_TRAIT_CONTRAST_BY_VARIANT: dict[str, tuple[str, str]] = {
+    "t1_discrete": (T1_TRAITS[0][0], T1_TRAITS[1][0]),
+    "t2_graded": (T2_TIERS[-1][0], T2_TIERS[0][0]),
+    "t3a_inferred_templated": (T3_LABELS[1], T3_LABELS[0]),
+    "t3b_inferred_llm": (T3_LABELS[1], T3_LABELS[0]),
+}
+
+
+def trait_contrast_for_variant(variant: str) -> tuple[str, str] | None:
+    """The (high, low) trait pair a causal test should contrast for `variant`,
+    or None if `variant` has no defined contrast (unknown variant name)."""
+    return _TRAIT_CONTRAST_BY_VARIANT.get(variant)
+
 HEDGE_PHRASES: list[str] = [
     "I'm fairly confident of that.",
     "I think that's right, though I'd double-check.",

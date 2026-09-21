@@ -97,6 +97,41 @@ def test_binding_cot_diagnostic_streams_one_row_per_record(tmp_path, monkeypatch
     assert all(row["parsed_letter"] == "A" for row in lines)
 
 
+TINY_MODEL = "sshleifer/tiny-gpt2"
+
+
+def test_binding_verdict4_runs_only_test4_and_writes_a_verdict(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    dataset_path = _write_t3a_dataset(tmp_path)
+    (tmp_path / "configs").mkdir()
+    config_path = tmp_path / "configs" / "binding.yaml"
+    config_path.write_text(
+        f"seed: 1\nsample_size: 3\noutput_dir: results/binding\n"
+        f"dataset_dir: {tmp_path}\nvariants: []\nmodels: []\ntrain_fraction: 0.5\n"
+        "layer_sweep: [0]\naccuracy_floor: 0.9\ncausal_clear_margin: 2.0\n"
+        "mean_intervention_coefficients: [1.0]\ndtype: float32\n"
+    )
+    # run_test4_only reads dataset_dir/<variant>.jsonl -- rename to match
+    (tmp_path / "t3a_inferred_templated.jsonl").write_text(dataset_path.read_text())
+
+    rc = main([
+        "binding", "verdict4",
+        "--model", TINY_MODEL,
+        "--variant", "t3a_inferred_templated",
+        "--config", str(config_path),
+    ])
+    assert rc == 0
+
+    prefix = f"{TINY_MODEL.replace('/', '_')}__t3a_inferred_templated__"
+    output_dir = tmp_path / "results" / "binding"
+    assert not (output_dir / f"{prefix}accuracy.jsonl").exists()
+    verdict_path = output_dir / f"{prefix}verdict4.json"
+    assert verdict_path.exists()
+    verdict = json.loads(verdict_path.read_text())
+    assert verdict["test"] == "mean_intervention"
+    assert "passed" in verdict
+
+
 def test_build_then_report_roundtrip(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # copy the test config next to a writable output dir

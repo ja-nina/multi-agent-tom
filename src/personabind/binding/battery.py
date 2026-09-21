@@ -95,10 +95,10 @@ def run_battery(model_id: str, config: dict) -> dict:
 
     from personabind.binding.accuracy import aggregate_accuracy, run_accuracy
     from personabind.binding.factorizability import run_factorizability
-    from personabind.binding.report import aggregate_intervention_results
+    from personabind.binding.report import aggregate_intervention_results, best_coefficient_effect_by_layer
     from personabind.binding.results import append_jsonl
     from personabind.common.activations import load_model, verify_tooling
-    from personabind.generator.traits import T1_TRAITS, T2_TIERS, T3_LABELS
+    from personabind.generator.traits import trait_contrast_for_variant
     from personabind.record import from_jsonl_line, sample_base_records
 
     output_dir = config.get("output_dir", "results/binding")
@@ -121,18 +121,6 @@ def run_battery(model_id: str, config: dict) -> dict:
     # variant) if a caller includes it in config["variants"] -- but it can
     # never set `verdict_key` or stop the walk, whether it "passes" or not.
     variant_fail_key = {"t1_discrete": "t1_fails", "t2_graded": "t2_fails", "t3a_inferred_templated": "t3a_fails"}
-    # Bind each variant's contrast to the generator's own vocabulary rather than
-    # re-typing strings, and key by VARIANT NAME rather than list position -- a
-    # `variants` list that doesn't start with t1_discrete/t2_graded (e.g. running
-    # T3a on its own) must still resolve the correct contrast for whichever
-    # variant is actually being processed. T1's two traits; T2's highest vs
-    # lowest tier; T3a/T3b's shared reliable/unreliable inferred label.
-    trait_contrast_by_variant = {
-        "t1_discrete": (T1_TRAITS[0][0], T1_TRAITS[1][0]),
-        "t2_graded": (T2_TIERS[-1][0], T2_TIERS[0][0]),
-        "t3a_inferred_templated": (T3_LABELS[1], T3_LABELS[0]),
-        "t3b_inferred_llm": (T3_LABELS[1], T3_LABELS[0]),
-    }
 
     variant_bar = tqdm(config["variants"], desc="binding battery: variants", unit="variant", file=sys.stdout)
     for variant in variant_bar:
@@ -178,7 +166,7 @@ def run_battery(model_id: str, config: dict) -> dict:
             stored_only = [r for r in factorizability_results if r.patch_site == "stored"]
             causal_effects_by_layer = aggregate_intervention_results(stored_only)
 
-            trait_contrast = trait_contrast_by_variant.get(variant)
+            trait_contrast = trait_contrast_for_variant(variant)
             if trait_contrast is not None:
                 position_test_path = os.path.join(
                     output_dir, f"{model_id.replace('/', '_')}__{variant}__position_test.jsonl"
@@ -200,21 +188,7 @@ def run_battery(model_id: str, config: dict) -> dict:
                         config["train_fraction"], seed, config_hash, on_result=lambda r: append_jsonl(r, fh),
                     )
                 if mean_intervention_results:
-                    # Mean-intervention emits one row per record PER COEFFICIENT, so
-                    # grouping by layer alone would pool the same record's repeated
-                    # measurements as if they were independent (inflating n, shrinking
-                    # the SE, inflating sigma). Group by (layer, coefficient), then keep
-                    # the single best-performing coefficient per layer.
-                    mi_by_layer_coef = aggregate_intervention_results(
-                        mean_intervention_results, key=lambda r: (r.layer, r.coefficient)
-                    )
-                    mi_effects: dict[int, tuple[float, float]] = {}
-                    for (layer, _coefficient), (mean_diff, se) in mi_by_layer_coef.items():
-                        sigma = (mean_diff / se) if se else float("-inf")
-                        existing = mi_effects.get(layer)
-                        existing_sigma = (existing[0] / existing[1]) if existing and existing[1] else float("-inf")
-                        if existing is None or sigma > existing_sigma:
-                            mi_effects[layer] = (mean_diff, se)
+                    mi_effects = best_coefficient_effect_by_layer(mean_intervention_results)
                     causal_effects_by_layer = _merge_causal_effects(causal_effects_by_layer, mi_effects)
 
         passed = gate_variant(acc_summary["accuracy"], causal_effects_by_layer, config["accuracy_floor"], config["causal_clear_margin"])

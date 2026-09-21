@@ -80,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     bind_cot.add_argument("--config", default="configs/binding.yaml", help="reused only for seed/sample_size/output_dir")
     bind_cot.add_argument("--max-tokens", type=int, default=1024)
 
+    bind_v4 = bind_sub.add_parser("verdict4")
+    bind_v4.add_argument("--model", required=True)
+    bind_v4.add_argument("--variant", required=True, help="e.g. t3a_inferred_templated")
+    bind_v4.add_argument("--config", default="configs/binding.yaml")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "build":
@@ -135,6 +140,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"cot_diagnostic (informational only, does not affect the verdict): "
                 f"{n_correct}/{len(scored)} correct, {len(scored)}/{len(results)} parsed -> {out_path}"
             )
+            return 0
+
+        if args.binding_cmd == "verdict4":
+            from personabind.binding.verdict4 import run_test4_only
+
+            result = run_test4_only(args.model, binding_config, args.variant)
+            status = "PASSED" if result["passed"] else "FAILED"
+            print(f"verdict4 ({args.variant}): {status} -> {result['verdict_path']}")
             return 0
 
     # report

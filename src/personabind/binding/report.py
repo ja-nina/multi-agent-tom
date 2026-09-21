@@ -33,6 +33,31 @@ def aggregate_intervention_results(results: list, key=lambda r: r.layer) -> dict
     return {k: mean_and_se(diffs) for k, diffs in grouped.items()}
 
 
+def best_coefficient_effect_by_layer(results: list) -> dict[int, tuple[float, float]]:
+    """For a test that sweeps a coefficient per layer (mean intervention),
+    reduce to ONE (mean, SE) per layer -- whichever coefficient gives the
+    strongest signed sigma at that layer -- so a caller can feed the result
+    straight into `battery.clears_baseline` without knowing about the
+    coefficient dimension at all.
+
+    Groups by (layer, coefficient) first, never layer alone: mean-
+    intervention emits one row per record PER coefficient, so pooling by
+    layer alone would treat the same record's repeated measurements as
+    independent observations, inflating n and understating the SE. NEVER
+    picks by abs(sigma) -- a strongly negative effect (a mis-signed
+    direction, or noise) must not be preferred over a smaller genuine
+    positive one."""
+    by_layer_coef = aggregate_intervention_results(results, key=lambda r: (r.layer, r.coefficient))
+    best: dict[int, tuple[float, float]] = {}
+    for (layer, _coefficient), (mean_diff, se) in by_layer_coef.items():
+        sigma = (mean_diff / se) if se else float("-inf")
+        existing = best.get(layer)
+        existing_sigma = (existing[0] / existing[1]) if existing and existing[1] else float("-inf")
+        if existing is None or sigma > existing_sigma:
+            best[layer] = (mean_diff, se)
+    return best
+
+
 def entanglement_flag(effect_on_target: float, effect_off_target: float | None) -> bool:
     if effect_off_target is None:
         return False
