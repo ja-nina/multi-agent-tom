@@ -119,7 +119,12 @@ def sample_free_completion(
 
     rng = torch.Generator().manual_seed(seed)
     ids = prompt_ids.clone()
-    for _ in range(n_tokens):
+    # No KV-cache: each iteration re-runs a full forward pass over the whole
+    # growing sequence. The outer per-record progress bar only ticks once
+    # this ENTIRE loop finishes, so without a bar here, a single record's
+    # free-sample generation can look identical to a hang for however long
+    # this loop takes -- this makes each token's progress visible instead.
+    for _ in tqdm(range(n_tokens), desc="sample_free_completion", unit="tok", file=sys.stdout, leave=False):
         logits = forward_logits(handle, ids)[0, -1].clone()
         if do_sample:
             logits = logits / max(temperature, 1e-5)

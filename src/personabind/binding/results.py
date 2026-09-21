@@ -85,6 +85,13 @@ def append_jsonl(result, fh) -> None:
     job's output). This is the streaming counterpart to `write_jsonl`: the
     battery calls this once per result, as each one is computed, instead of
     accumulating a whole test's results in memory and writing them all in
-    one batch at the very end."""
+    one batch at the very end.
+
+    `flush()` alone only pushes Python's internal buffer into the OS's page
+    cache -- on a networked filesystem (e.g. NFS-mounted cluster scratch),
+    a DIFFERENT process reading the same file (like a `tail -f`) can still
+    see nothing until that data actually reaches the filesystem, which is
+    exactly what `fsync` forces."""
     fh.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
     fh.flush()
+    os.fsync(fh.fileno())

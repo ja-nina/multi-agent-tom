@@ -55,6 +55,11 @@ PYTHON="${PERSONABIND_PYTHON:-$PWD/.venv/bin/python}"
 export HF_HOME="${HF_HOME:-$PWD/.hf_cache}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 export TOKENIZERS_PARALLELISM=false
+# Python fully block-buffers stdout when it isn't a TTY (e.g. redirected to
+# this job's .out file) -- without this, print()/tqdm output can sit in an
+# internal buffer for a long time before ever reaching the file, making a
+# job that's actually progressing look stuck to anyone tailing the log.
+export PYTHONUNBUFFERED=1
 
 echo "[info] node=$(hostname)  model=${MODEL_REPO}  config=${CONFIG}  python=${PYTHON}"
-"$PYTHON" -m personabind.cli binding run --model "$MODEL_REPO" --config "$CONFIG"
+"$PYTHON" -u -m personabind.cli binding run --model "$MODEL_REPO" --config "$CONFIG"
