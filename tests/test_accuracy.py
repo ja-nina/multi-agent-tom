@@ -169,6 +169,50 @@ def test_sample_free_completion_uses_generation_config_sampling_when_present():
     assert out_a == out_b, "same seed must reproduce the same sampled completion"
 
 
+def test_sample_free_completion_creates_its_generator_on_the_logits_device():
+    """Real cluster crash regression guard: torch.Generator() defaults to a
+    CPU generator, but torch.multinomial requires the generator's device to
+    match the sampled tensor's device exactly -- on a real CUDA run this
+    raised 'RuntimeError: Expected a cuda device type for generator but
+    found cpu' the moment do_sample=True was actually exercised (silently
+    never hit on models whose own generation_config has do_sample=False,
+    which is why this surfaced on one model's real run but not another's,
+    despite identical code). Can't create a real CUDA tensor on a CPU-only
+    test machine, so this asserts the STRUCTURAL fix instead: the generator
+    must always be constructed with device=<the actual logits tensor's
+    device>, never left to default silently."""
+    handle = load_model(TINY_MODEL, dtype=torch.float32)
+    ids = handle._tokenizer("Once upon a", return_tensors="pt").input_ids
+
+    class _FakeGenConfig:
+        do_sample = True
+        temperature = 0.7
+        top_p = 0.8
+        top_k = 20
+        eos_token_id = None
+
+    handle._model.generation_config = _FakeGenConfig()
+    sample_free_completion(handle, ids, seed=999, n_tokens=1)  # warm-up, see comment above
+
+    seen_devices = []
+    real_generator_cls = torch.Generator
+
+    def spy_generator(*args, **kwargs):
+        seen_devices.append(kwargs.get("device"))
+        return real_generator_cls(*args, **kwargs)
+
+    handle._model.generation_config = _FakeGenConfig()
+    with patch("torch.Generator", side_effect=spy_generator):
+        sample_free_completion(handle, ids, seed=42, n_tokens=3)
+
+    assert seen_devices, "torch.Generator was never constructed on the sampling path"
+    assert seen_devices[0] == torch.device("cpu"), (
+        "generator must be constructed with an explicit device matching the logits tensor's "
+        "own device, not left to default -- a bare torch.Generator() would silently default "
+        "to CPU regardless of where the model (and therefore logits/probs) actually lives"
+    )
+
+
 def test_sample_free_completion_falls_back_to_greedy_without_a_sampling_config():
     """A model whose generation_config has no do_sample=True (tiny-gpt2's
     real config, and most base models) must fall back to plain greedy

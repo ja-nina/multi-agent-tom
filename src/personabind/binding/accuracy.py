@@ -123,7 +123,7 @@ def sample_free_completion(
     else:
         eos_ids = {eos_token_id}
 
-    rng = torch.Generator().manual_seed(seed)
+    rng = None  # lazily created on first use, once we know what device logits actually live on
     ids = prompt_ids.clone()
     next_input = prompt_ids
     past_key_values = None
@@ -151,6 +151,13 @@ def sample_free_completion(
                 logits = torch.full_like(logits, float("-inf"))
                 logits[sorted_idx] = sorted_logits
             probs = torch.softmax(logits, dim=-1)
+            # torch.multinomial requires the generator's device to match
+            # probs's device exactly -- a bare torch.Generator() defaults to
+            # CPU, which crashes the moment the model (and therefore probs)
+            # is on CUDA. Create it lazily, on probs's ACTUAL device, instead
+            # of assuming CPU up front.
+            if rng is None:
+                rng = torch.Generator(device=probs.device).manual_seed(seed)
             next_id = int(torch.multinomial(probs, 1, generator=rng).item())
         else:
             next_id = int(logits.argmax().item())
