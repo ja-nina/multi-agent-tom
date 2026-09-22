@@ -4,6 +4,7 @@ import pytest
 
 from personabind.binding.report import (
     aggregate_intervention_results,
+    best_coefficient_effect_and_entanglement_by_layer,
     best_coefficient_effect_by_layer,
     entanglement_flag,
     mean_and_se,
@@ -147,6 +148,57 @@ def test_best_coefficient_effect_by_layer_never_prefers_a_negative_effect_by_mag
     best = best_coefficient_effect_by_layer(results)
     mean5, _se5 = best[5]
     assert mean5 > 0  # picked the coefficient=0.5 group, not the larger-magnitude negative one
+
+
+def test_best_coefficient_effect_and_entanglement_by_layer_flags_a_leaky_layer():
+    # off_target ~= on_target at the winning coefficient -> entangled.
+    results = [
+        _result(5, 0.10, 0.0, off_target=0.10, coefficient=1.0, record_id="a"),
+        _result(5, 0.12, 0.0, off_target=0.11, coefficient=1.0, record_id="b"),
+    ]
+    out = best_coefficient_effect_and_entanglement_by_layer(results)
+    assert out[5]["entangled"] is True
+    assert out[5]["entanglement_ratio"] == pytest.approx(1.0, abs=0.05)
+
+
+def test_best_coefficient_effect_and_entanglement_by_layer_does_not_flag_a_specific_layer():
+    # off_target ~= 0 while on_target is large -> not entangled.
+    results = [
+        _result(5, 0.50, 0.0, off_target=0.01, coefficient=1.0, record_id="a"),
+        _result(5, 0.52, 0.0, off_target=0.02, coefficient=1.0, record_id="b"),
+    ]
+    out = best_coefficient_effect_and_entanglement_by_layer(results)
+    assert out[5]["entangled"] is False
+    assert out[5]["entanglement_ratio"] < 0.5
+
+
+def test_best_coefficient_effect_and_entanglement_by_layer_uses_the_same_winning_coefficient_as_effect_by_layer():
+    # Regression guard: the entanglement ratio must be computed from the
+    # SAME (layer, coefficient) group best_coefficient_effect_by_layer picks
+    # -- not a separately-reimplemented selection that could silently drift.
+    results = [
+        _result(5, 0.10, 0.0, off_target=0.09, coefficient=0.5, record_id="a"),
+        _result(5, 0.11, 0.0, off_target=0.10, coefficient=0.5, record_id="b"),
+        _result(5, 0.50, 0.0, off_target=0.01, coefficient=2.0, record_id="a"),
+        _result(5, 0.51, 0.0, off_target=0.02, coefficient=2.0, record_id="b"),
+    ]
+    plain_best = best_coefficient_effect_by_layer(results)
+    combined = best_coefficient_effect_and_entanglement_by_layer(results)
+    assert combined[5]["mean_diff"] == pytest.approx(plain_best[5][0])
+    assert combined[5]["coefficient"] == 2.0  # the stronger-sigma group
+    assert combined[5]["entangled"] is False  # that group's off_target is small
+
+
+def test_best_coefficient_effect_and_entanglement_by_layer_handles_missing_off_target():
+    # effect_off_target is only ever None for patch_site="retrieved" (the
+    # only site InterventionResult permits it for).
+    results = [
+        replace(_result(5, 0.10, 0.0, coefficient=1.0, record_id="a"), patch_site="retrieved", effect_off_target=None),
+        replace(_result(5, 0.11, 0.0, coefficient=1.0, record_id="b"), patch_site="retrieved", effect_off_target=None),
+    ]
+    out = best_coefficient_effect_and_entanglement_by_layer(results)
+    assert out[5]["entanglement_ratio"] is None
+    assert out[5]["entangled"] is False
 
 
 def test_entanglement_flag():
